@@ -1,0 +1,44 @@
+[project]
+name = "alchimiste"
+version = "0.1.0"
+description = "Two ML models: readability-style DOM node extraction and text cleanup, for use with alembic."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Jean-Francois Im", email = "jeanfrancois.im@gmail.com" },
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8.0",
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
