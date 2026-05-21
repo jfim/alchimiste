@@ -36,6 +36,8 @@ Thumbs.db
 # ML / data
 data/
 datasets/
+!src/alchimiste/datasets/
+!tests/datasets/
 checkpoints/
 *.ckpt
 *.pt
