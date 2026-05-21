@@ -8,12 +8,19 @@ authors = [
     { name = "Jean-Francois Im", email = "jeanfrancois.im@gmail.com" },
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "httpx>=0.27",
+    "polars-lts-cpu>=1.0",
+]
+
+[project.scripts]
+alchimiste = "alchimiste.cli:main"
 
 [dependency-groups]
 dev = [
     "ruff>=0.8.0",
     "pytest>=8.0",
+    "pytest-httpx>=0.30",
 ]
 
 [build-system]
