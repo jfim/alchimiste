@@ -57,6 +57,8 @@ def test_oxen_commit_raises_on_other_failure(tmp_path: Path):
 
         return R()
 
-    with patch("alchimiste.datasets.oxen.subprocess.run", fake_run):
-        with pytest.raises(RuntimeError):
-            oxen_commit(tmp_path, "x")
+    with (
+        patch("alchimiste.datasets.oxen.subprocess.run", fake_run),
+        pytest.raises(RuntimeError),
+    ):
+        oxen_commit(tmp_path, "x")
