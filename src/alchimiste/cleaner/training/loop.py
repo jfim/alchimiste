@@ -52,36 +52,49 @@ class RunResult:
 
 
 def train(cfg: DictConfig) -> RunResult:
-    """Run one training pass. Pure-function-ish: I/O is confined to
-    `artifact_dir` (derived from Hydra) and the model's `fit` callback
-    chain."""
-    artifact_dir = _resolve_artifact_dir()
-    artifact_dir.mkdir(parents=True, exist_ok=True)
+    """Single-seed training pass. Backward-compatible wrapper around the
+    multi-seed driver: if `cfg.seeds` is present and non-empty, dispatch
+    to `train_seeds` (each seed gets its own sub-directory + MLflow run);
+    otherwise run once at `cfg.seed`."""
+    seeds = _seeds_from_cfg(cfg)
+    if seeds is not None:
+        results = train_seeds(cfg, seeds)
+        # Return the first run's result for callers that expect a single
+        # RunResult. `train_seeds` is the source of truth for the rest.
+        return results[0]
+    return _train_one(cfg, seed=int(cfg.seed), artifact_dir=_resolve_artifact_dir())
 
-    # Seed every RNG that affects training BEFORE we instantiate the tagger
-    # or build the data loader. Before this, only `make_splits` consumed
-    # `cfg.seed` — the freshly-initialized classifier head, the DataLoader
-    # shuffle order, and the dropout masks all came from PyTorch's default
-    # global RNG (seeded from /dev/urandom each process). That made every
-    # training run start from a different head + see batches in a different
-    # order, producing F1 swings far larger than any hyperparameter effect
-    # we were trying to measure. See docs/autoresearch/log.md, batch-2
-    # Phase C postmortem.
-    _seed_all_rngs(int(cfg.seed))
 
-    # Dataset provenance (REQ-014). Best-effort: if `data.oxen_dir` isn't
-    # an oxen working tree, we tag the run as "unknown" and continue —
-    # this lets unit tests run against synthesized fixtures without an
-    # oxen init. Real training is expected to point at the puller's
-    # output tree, where read_commit always succeeds.
+def train_seeds(cfg: DictConfig, seeds: list[int]) -> list[RunResult]:
+    """Train one model per seed in a single Python process.
+
+    Amortizes the per-process setup that doesn't depend on the seed:
+      * Python interpreter + library imports (paid by the caller).
+      * Pretrained encoder + tokenizer files in the HF cache.
+      * Loading articles from the oxen working tree.
+      * Tokenizing every article once.
+
+    The encoder weights live in different Python objects per seed (a new
+    `Tagger` is instantiated each time) so that an unfrozen-backbone run
+    on seed `n+1` starts from the pristine pretrained state, not from
+    the fine-tuned weights produced by seed `n`. Verified empirically
+    with `seeds=[k,k,k]` producing identical loss curves.
+
+    Each seed's artifacts live under `<hydra_output>/seed-<N>/`, and each
+    gets its own MLflow run.
+    """
+    if not seeds:
+        raise ValueError("train_seeds: at least one seed required")
+
+    artifact_root = _resolve_artifact_dir()
+    artifact_root.mkdir(parents=True, exist_ok=True)
+
     oxen_meta = _try_read_oxen_meta(Path(cfg.data.oxen_dir))
     if oxen_meta is not None and oxen_meta.dirty and not cfg.data.allow_dirty:
         raise RuntimeError(
             f"oxen working tree at {cfg.data.oxen_dir} is dirty; refuse to "
             "train (REQ-014). Re-run with data.allow_dirty=true to override."
         )
-
-    tagger = _instantiate_tagger(cfg.model)
     articles = load_oxen_tree(
         cfg.data.oxen_dir,
         stage=cfg.data.stage,
@@ -90,17 +103,94 @@ def train(cfg: DictConfig) -> RunResult:
         min_bytes=int(cfg.data.get("min_bytes", 0)),
     )
 
-    splits = make_splits(
-        item_ids=[a.item_id for a in articles],
-        seed=cfg.seed,
-    )
-    splits.write_json(artifact_dir / "splits.json")
+    # Tokenize every article exactly once. Tokenization is deterministic
+    # given (text, tokenizer, max_seq_len) — no seed dependency — so the
+    # cache is safe to share across seeds. Use a throwaway tagger just
+    # for its tokenizer; per-seed taggers get fresh model weights below.
+    _seed_all_rngs(int(seeds[0]))  # only affects tokenizer-init RNG, harmless
+    tokenizer_tagger = _instantiate_tagger(cfg.model)
+    all_tokenized = {
+        a.item_id: tokenizer_tagger.tokenize([a], max_seq_len=cfg.data.max_seq_len)[0]
+        for a in articles
+    }
 
+    results: list[RunResult] = []
+    for i, seed in enumerate(seeds):
+        artifact_dir = artifact_root / f"seed-{seed}-{i}"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        result = _train_one(
+            cfg=cfg,
+            seed=int(seed),
+            artifact_dir=artifact_dir,
+            oxen_meta=oxen_meta,
+            articles=all_tokenized_to_articles_for_split(articles, all_tokenized),
+            tokenized_by_id=all_tokenized,
+        )
+        results.append(result)
+    return results
+
+
+def all_tokenized_to_articles_for_split(
+    articles: list[LabeledArticle],
+    tokenized_by_id: dict,
+) -> list[LabeledArticle]:
+    """Keep articles in the same order, filtering to those that have a
+    matching tokenized entry (in practice all do — guard for noisy data)."""
+    return [a for a in articles if a.item_id in tokenized_by_id]
+
+
+def _train_one(
+    cfg: DictConfig,
+    seed: int,
+    artifact_dir: Path,
+    oxen_meta: OxenMeta | None = None,
+    articles: list[LabeledArticle] | None = None,
+    tokenized_by_id: dict | None = None,
+) -> RunResult:
+    """Inner per-seed training pass. Used by both single-seed `train()`
+    and the multi-seed `train_seeds()` driver. The `articles` and
+    `tokenized_by_id` arguments let the multi-seed driver share work
+    across seeds; left None they fall back to loading + tokenizing
+    inside this call (the single-seed path)."""
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    # Seed every RNG that affects training BEFORE we instantiate the tagger
+    # or build the data loader. See `_seed_all_rngs` for why.
+    _seed_all_rngs(seed)
+
+    if oxen_meta is None:
+        oxen_meta = _try_read_oxen_meta(Path(cfg.data.oxen_dir))
+        if oxen_meta is not None and oxen_meta.dirty and not cfg.data.allow_dirty:
+            raise RuntimeError(
+                f"oxen working tree at {cfg.data.oxen_dir} is dirty; refuse to "
+                "train (REQ-014). Re-run with data.allow_dirty=true to override."
+            )
+
+    if articles is None:
+        articles = load_oxen_tree(
+            cfg.data.oxen_dir,
+            stage=cfg.data.stage,
+            require_nfc=cfg.data.require_nfc,
+            range_units=cfg.data.range_units,
+            min_bytes=int(cfg.data.get("min_bytes", 0)),
+        )
+
+    splits = make_splits(item_ids=[a.item_id for a in articles], seed=seed)
+    splits.write_json(artifact_dir / "splits.json")
     train_arts, val_arts, test_arts = _partition_articles(articles, splits)
 
-    train_ex = tagger.tokenize(train_arts, max_seq_len=cfg.data.max_seq_len)
-    val_ex = tagger.tokenize(val_arts, max_seq_len=cfg.data.max_seq_len)
-    test_ex = tagger.tokenize(test_arts, max_seq_len=cfg.data.max_seq_len)
+    # Fresh tagger every call so seed `n+1`'s training starts from the
+    # pristine pretrained encoder, not from seed `n`'s fine-tuned weights.
+    tagger = _instantiate_tagger(cfg.model)
+
+    if tokenized_by_id is not None:
+        # Multi-seed path: reuse pre-tokenized examples.
+        train_ex = [tokenized_by_id[a.item_id] for a in train_arts]
+        val_ex = [tokenized_by_id[a.item_id] for a in val_arts]
+        test_ex = [tokenized_by_id[a.item_id] for a in test_arts]
+    else:
+        train_ex = tagger.tokenize(train_arts, max_seq_len=cfg.data.max_seq_len)
+        val_ex = tagger.tokenize(val_arts, max_seq_len=cfg.data.max_seq_len)
+        test_ex = tagger.tokenize(test_arts, max_seq_len=cfg.data.max_seq_len)
 
     # The model receives only its sub-config; expose training hyperparameters
     # via a private `_training` key so implementations can look them up
@@ -117,12 +207,8 @@ def train(cfg: DictConfig) -> RunResult:
         tagger.fit(train_ex, val_ex, model_cfg, callbacks)
         tagger.save(artifact_dir / "model")
 
-        # Persist the resolved config alongside the artifact so it can be
-        # re-loaded without re-composing (REQ-011 artifact layout).
         OmegaConf.save(cfg, artifact_dir / "config.yaml")
 
-        # Threshold sweep on val + IoU/REQ-003 metrics on test (TASK-020,
-        # TASK-021). Returns the metric dict for mlflow + metrics.json.
         metrics = _finalize(
             tagger=tagger,
             val_articles=val_arts,
@@ -132,17 +218,9 @@ def train(cfg: DictConfig) -> RunResult:
             artifact_dir=artifact_dir,
             eval_cfg=cfg.eval,
         )
-        # mlflow accepts floats only.
         scalar_metrics = {k: float(v) for k, v in metrics.items() if isinstance(v, (int, float))}
         mlflow_io.log_final(scalar_metrics, artifact_dir)
 
-        # Optionally register a self-contained pyfunc that any consumer can
-        # load via mlflow.pyfunc.load_model (REQ-011). The model file is
-        # large (~300 MB for ModernBERT) and the upload to a remote tracking
-        # server is flaky, so this defaults off — flip the knob on when a
-        # particular run is meant to be promoted. The local artifact_dir
-        # already contains everything needed to reload the model via
-        # `just eval artifact=outputs/<date>/<time>`.
         if cfg.mlflow.get("register_model", False):
             threshold_payload = json.loads(
                 (artifact_dir / "threshold.json").read_text(encoding="utf-8")
@@ -162,6 +240,24 @@ def train(cfg: DictConfig) -> RunResult:
         val_size=len(val_ex),
         test_size=len(test_ex),
     )
+
+
+def _seeds_from_cfg(cfg: DictConfig) -> list[int] | None:
+    """Resolve `cfg.seeds` to a non-empty list, or None when absent/empty.
+
+    Accepts: a list/ListConfig (`seeds=[11,17,42]`), a single int
+    (`seeds=11`), or a string of comma-separated ints (`seeds=11,17,42`).
+    """
+    raw = cfg.get("seeds", None)
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = [s for s in (s.strip() for s in raw.split(",")) if s]
+    try:
+        ints = [int(s) for s in raw]
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"cfg.seeds must be int / list[int] / 'a,b,c'; got {raw!r}") from e
+    return ints if ints else None
 
 
 def _seed_all_rngs(seed: int) -> None:
@@ -223,11 +319,16 @@ def _resolve_artifact_dir() -> Path:
 
 @hydra.main(config_path=_CONFIG_PATH, config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
-    result = train(cfg)
-    # Plain stdout so `just train` is grep-able / scriptable. Real
-    # observability lives in mlflow once TASK-018 lands.
-    print(f"artifact_dir: {result.artifact_dir}")
-    print(f"sizes: train={result.train_size} val={result.val_size} test={result.test_size}")
+    seeds = _seeds_from_cfg(cfg)
+    if seeds is not None:
+        results = train_seeds(cfg, seeds)
+        for seed, r in zip(seeds, results, strict=True):
+            print(f"seed={seed} artifact_dir: {r.artifact_dir}")
+            print(f"  sizes: train={r.train_size} val={r.val_size} test={r.test_size}")
+    else:
+        result = train(cfg)
+        print(f"artifact_dir: {result.artifact_dir}")
+        print(f"sizes: train={result.train_size} val={result.val_size} test={result.test_size}")
 
 
 if __name__ == "__main__":

@@ -44,3 +44,11 @@ mlflow:
   register_model: false
 
 seed: 17                     # NFR-001 reproducibility; also seeds data/split.py
+# Optional: when set to a non-empty list, the training loop dispatches
+# to `train_seeds`, running one training pass per listed seed in the
+# same Python process. Amortizes startup + tokenization across seeds.
+# Each seed gets its own MLflow run + artifact subdirectory.
+# Examples:
+#   just train +seeds=[11,17,42]
+#   just train '+seeds="11,17,42"'   # comma-string also accepted
+seeds: null
