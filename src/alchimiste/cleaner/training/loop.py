@@ -74,7 +74,11 @@ def train(cfg: DictConfig) -> RunResult:
     # TASK-018 will replace these with real mlflow-routing callbacks.
     callbacks = TrainingCallbacks()
 
-    tagger.fit(train_ex, val_ex, cfg.model, callbacks)
+    # The model receives only its sub-config; expose training hyperparameters
+    # via a private `_training` key so implementations can look them up
+    # without parsing the whole config tree.
+    model_cfg = OmegaConf.merge(cfg.model, {"_training": cfg.get("training", {})})
+    tagger.fit(train_ex, val_ex, model_cfg, callbacks)
 
     # Smoke-call predict on val so a broken predict_token_probs surfaces
     # immediately, not at eval time.
