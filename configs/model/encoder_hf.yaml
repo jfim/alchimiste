@@ -1,0 +1,10 @@
+# HuggingFace encoder + token-classification head.
+#
+# Adding a new architecture is one new module under
+# src/alchimiste/cleaner/models/ and one new yaml here pointing at it.
+# The training loop dynamically imports `module` (TASK-013).
+
+# @package model
+name: encoder_hf
+module: alchimiste.cleaner.models.encoder_hf
+hf_model_name: distilbert-base-uncased
