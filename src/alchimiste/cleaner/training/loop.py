@@ -89,8 +89,10 @@ def train(cfg: DictConfig) -> RunResult:
 
     # The model receives only its sub-config; expose training hyperparameters
     # via a private `_training` key so implementations can look them up
-    # without parsing the whole config tree.
-    model_cfg = OmegaConf.merge(cfg.model, {"_training": cfg.get("training", {})})
+    # without parsing the whole config tree. Hydra's default struct mode
+    # rejects new keys, so clone and disable it for the merged sub-config.
+    model_cfg = OmegaConf.create(OmegaConf.to_container(cfg.model, resolve=True))
+    model_cfg._training = OmegaConf.to_container(cfg.get("training", {}), resolve=True)
 
     # Route per-batch / per-epoch metrics into mlflow (REQ-015). If mlflow
     # isn't configured (e.g. unit tests setting tracking_uri="" to disable),
