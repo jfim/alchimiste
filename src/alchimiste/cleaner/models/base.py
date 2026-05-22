@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from omegaconf import DictConfig
 
     from alchimiste.cleaner.data.align import TokenizedExample
+    from alchimiste.cleaner.data.loader import LabeledArticle
 
 
 @dataclass
@@ -47,6 +48,19 @@ class TokenTagger(Protocol):
     Implementations are free to use any framework (PyTorch, JAX, sklearn)
     — only this surface is fixed.
     """
+
+    def tokenize(
+        self,
+        articles: list[LabeledArticle],
+        max_seq_len: int,
+    ) -> list[TokenizedExample]:
+        """Tokenize `articles` using the implementation's own tokenizer.
+
+        The training loop calls this once per partition so the loop never
+        needs to know anything about the tokenizer family (HF fast,
+        sentencepiece, custom). Implementations typically delegate to
+        `alchimiste.cleaner.data.align.tokenize_and_align`.
+        """
 
     def fit(
         self,
