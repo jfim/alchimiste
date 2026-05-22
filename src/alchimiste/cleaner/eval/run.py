@@ -45,6 +45,7 @@ def evaluate(artifact_dir: Path, *, override_oxen_dir: Path | None = None) -> di
         stage=cfg.data.stage,
         require_nfc=cfg.data.require_nfc,
         range_units=cfg.data.range_units,
+        min_bytes=int(cfg.data.get("min_bytes", 0)),
     )
     by_id = {a.item_id: a for a in articles}
     val_arts = [by_id[i] for i in splits.val if i in by_id]

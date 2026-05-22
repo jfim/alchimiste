@@ -20,3 +20,8 @@ range_units: codepoint
 # (out of scope: streaming / chunked inference). Truncated articles are
 # logged so v2 can decide whether to chunk.
 max_seq_len: 512
+
+# Drop articles whose NFC markdown is shorter than this in UTF-8 bytes.
+# Tiny rows are usually stubs / boilerplate-only pages and add noise
+# without signal. 0 disables the filter.
+min_bytes: 1024

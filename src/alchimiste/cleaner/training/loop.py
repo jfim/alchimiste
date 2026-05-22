@@ -73,6 +73,7 @@ def train(cfg: DictConfig) -> RunResult:
         stage=cfg.data.stage,
         require_nfc=cfg.data.require_nfc,
         range_units=cfg.data.range_units,
+        min_bytes=int(cfg.data.get("min_bytes", 0)),
     )
 
     splits = make_splits(

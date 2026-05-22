@@ -48,6 +48,7 @@ def load_oxen_tree(
     *,
     require_nfc: bool = True,
     range_units: RangeUnits = "byte",
+    min_bytes: int = 0,
 ) -> list[LabeledArticle]:
     """Load every row in `<oxen_dir>/<stage>/rows.parquet` as a `LabeledArticle`.
 
@@ -67,6 +68,10 @@ def load_oxen_tree(
         "byte" matches today's alambic export; the loader converts to
         codepoint offsets via UTF-8 indexing on the NFC text. "codepoint"
         is the target contract once alambic adopts it.
+    min_bytes
+        Drop articles whose NFC `markdown_text` is shorter than this in
+        UTF-8 bytes. `0` (default) keeps everything. Tiny rows are often
+        stubs or boilerplate-only pages that add noise without signal.
 
     Raises
     ------
@@ -93,14 +98,15 @@ def load_oxen_tree(
 
     articles: list[LabeledArticle] = []
     for row in df.iter_rows(named=True):
-        articles.append(
-            _load_row(
-                row,
-                blobs_dir=blobs_dir,
-                require_nfc=require_nfc,
-                range_units=range_units,
-            )
+        article = _load_row(
+            row,
+            blobs_dir=blobs_dir,
+            require_nfc=require_nfc,
+            range_units=range_units,
         )
+        if min_bytes > 0 and len(article.markdown_text.encode("utf-8")) < min_bytes:
+            continue
+        articles.append(article)
     return articles
 
 
