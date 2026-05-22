@@ -122,18 +122,24 @@ def train(cfg: DictConfig) -> RunResult:
         scalar_metrics = {k: float(v) for k, v in metrics.items() if isinstance(v, (int, float))}
         mlflow_io.log_final(scalar_metrics, artifact_dir)
 
-        # Register a self-contained pyfunc that any consumer can load
-        # via mlflow.pyfunc.load_model (REQ-011).
-        threshold_payload = json.loads(
-            (artifact_dir / "threshold.json").read_text(encoding="utf-8")
-        )
-        mlflow_io.log_pyfunc_model(
-            artifact_dir,
-            registered_model_name=cfg.mlflow.model_name,
-            threshold=float(threshold_payload["threshold"]),
-            threshold_iou=float(threshold_payload["iou_metric"]),
-            fell_back_to_max_precision=bool(threshold_payload["fell_back_to_max_precision"]),
-        )
+        # Optionally register a self-contained pyfunc that any consumer can
+        # load via mlflow.pyfunc.load_model (REQ-011). The model file is
+        # large (~300 MB for ModernBERT) and the upload to a remote tracking
+        # server is flaky, so this defaults off — flip the knob on when a
+        # particular run is meant to be promoted. The local artifact_dir
+        # already contains everything needed to reload the model via
+        # `just eval artifact=outputs/<date>/<time>`.
+        if cfg.mlflow.get("register_model", False):
+            threshold_payload = json.loads(
+                (artifact_dir / "threshold.json").read_text(encoding="utf-8")
+            )
+            mlflow_io.log_pyfunc_model(
+                artifact_dir,
+                registered_model_name=cfg.mlflow.model_name,
+                threshold=float(threshold_payload["threshold"]),
+                threshold_iou=float(threshold_payload["iou_metric"]),
+                fell_back_to_max_precision=bool(threshold_payload["fell_back_to_max_precision"]),
+            )
 
     return RunResult(
         artifact_dir=artifact_dir,

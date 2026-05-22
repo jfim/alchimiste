@@ -140,3 +140,51 @@ def test_train_logs_batch_loss_and_finalizes(tmp_path: Path) -> None:
     assert run.data.tags.get("alchimiste.model.architecture") == "stub_for_mlflow_test"
     # Dataset dir tag set even when oxen meta unavailable.
     assert "alchimiste.dataset.oxen_dir" in run.data.tags
+    # `mlflow.register_model` defaults to false → no registered model
+    # version got created for this experiment's model name. This pins the
+    # default off behavior so a regression would be loud.
+    versions = client.search_model_versions(
+        "name='alchimiste-text-cleaner-stub_for_mlflow_test'"
+    )
+    assert versions == [], (
+        f"expected no registered model versions when register_model=false, got {len(versions)}"
+    )
+
+
+def test_train_registers_pyfunc_when_register_model_true(tmp_path: Path) -> None:
+    """When `mlflow.register_model=true`, the pyfunc gets logged and a
+    model version is registered. Mirrors the default-off test but with
+    the knob flipped on."""
+    _register_stub()
+    oxen_dir = _synth_oxen_tree(tmp_path / "oxen")
+    out_dir = tmp_path / "hydra_out"
+    tracking_uri = f"file://{tmp_path / 'mlruns'}"
+
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(config_dir=CONFIGS_DIR, version_base=None):
+        cfg = compose(
+            config_name="config",
+            overrides=[
+                "data.allow_dirty=true",
+                "data.require_nfc=false",
+                "data.min_bytes=0",
+                f"data.oxen_dir={oxen_dir}",
+                "~model",
+                f"+model.module={_STUB_MODULE_NAME}",
+                "+model.name=stub_for_register_true_test",
+                f"mlflow.tracking_uri={tracking_uri}",
+                "mlflow.experiment=alchimiste_test_register_true",
+                "mlflow.register_model=true",
+            ],
+            return_hydra_config=True,
+        )
+    cfg.hydra.runtime.output_dir = str(out_dir)
+    HydraConfig.instance().set_config(cfg)
+    user_cfg = OmegaConf.masked_copy(cfg, ["data", "model", "training", "eval", "mlflow", "seed"])
+    train(user_cfg)
+
+    client = MlflowClient(tracking_uri=tracking_uri)
+    versions = client.search_model_versions(
+        "name='alchimiste-text-cleaner-stub_for_register_true_test'"
+    )
+    assert len(versions) >= 1, "register_model=true should register at least one model version"
