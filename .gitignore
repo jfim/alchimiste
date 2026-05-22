@@ -38,6 +38,7 @@ data/
 datasets/
 !src/alchimiste/datasets/
 !src/alchimiste/cleaner/data/
+!configs/data/
 !tests/datasets/
 checkpoints/
 *.ckpt

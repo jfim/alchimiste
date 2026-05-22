@@ -1,0 +1,21 @@
+# Data layer config — oxen working tree, NFC handling, sequence length.
+
+oxen_dir: ./alchimiste-data
+stage: cleaning
+
+# REQ-014: refuse a dirty working tree by default — the recorded commit
+# hash would not represent what was trained on.
+allow_dirty: false
+
+# REQ-013: enforce NFC normalization on read. Until alambic emits NFC
+# natively (Open Question Q3), set to false to normalize defensively.
+require_nfc: true
+
+# Transitional knob for Open Question Q3 — alambic currently emits byte
+# offsets. Switch to "codepoint" once alambic exports codepoint offsets.
+range_units: byte
+
+# Hard truncation for documents that exceed the model's context window
+# (out of scope: streaming / chunked inference). Truncated articles are
+# logged so v2 can decide whether to chunk.
+max_seq_len: 512
