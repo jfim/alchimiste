@@ -8,3 +8,12 @@
 name: encoder_hf
 module: alchimiste.cleaner.models.encoder_hf
 hf_model_name: distilbert-base-uncased
+
+# Pluggable classification head — see `models/heads.py`. The default
+# linear head matches HF's built-in `XxxForTokenClassification` head
+# shape (dropout + linear projection); switch `type` to register new
+# head architectures (CRF, conv+linear, BiLSTM+CRF, …) without changing
+# the encoder side.
+head:
+  type: linear
+  dropout: 0.1
