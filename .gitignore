@@ -37,6 +37,7 @@ Thumbs.db
 data/
 datasets/
 !src/alchimiste/datasets/
+!src/alchimiste/cleaner/data/
 !tests/datasets/
 checkpoints/
 *.ckpt
