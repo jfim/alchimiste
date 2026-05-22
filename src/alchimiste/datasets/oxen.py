@@ -31,3 +31,18 @@ def oxen_commit(repo_dir: Path, message: str) -> str | None:
     if "nothing to commit" in stderr or "no changes" in stderr:
         return None
     raise RuntimeError(f"oxen commit failed: {commit.stderr.decode(errors='replace')}")
+
+
+def oxen_push(repo_dir: Path) -> None:
+    """Run `oxen push` in `repo_dir`.
+
+    Pushes the current branch to the default remote. Raises `RuntimeError`
+    on failure; the caller decides whether to block or warn.
+    """
+    push = subprocess.run(
+        ["oxen", "push"],
+        cwd=repo_dir,
+        capture_output=True,
+    )
+    if push.returncode != 0:
+        raise RuntimeError(f"oxen push failed: {push.stderr.decode(errors='replace')}")

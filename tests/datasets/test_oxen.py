@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
-from alchimiste.datasets.oxen import oxen_commit
+from alchimiste.datasets.oxen import oxen_commit, oxen_push
 
 
 def _runs(cmds: list[list[str]]):
@@ -62,3 +62,38 @@ def test_oxen_commit_raises_on_other_failure(tmp_path: Path):
         pytest.raises(RuntimeError),
     ):
         oxen_commit(tmp_path, "x")
+
+
+def test_oxen_push_invokes_oxen_push(tmp_path: Path):
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+
+        class R:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        return R()
+
+    with patch("alchimiste.datasets.oxen.subprocess.run", fake_run):
+        oxen_push(tmp_path)
+
+    assert calls == [["oxen", "push"]]
+
+
+def test_oxen_push_raises_on_failure(tmp_path: Path):
+    def fake_run(args, **kwargs):
+        class R:
+            returncode = 1
+            stdout = b""
+            stderr = b"remote unreachable\n"
+
+        return R()
+
+    with (
+        patch("alchimiste.datasets.oxen.subprocess.run", fake_run),
+        pytest.raises(RuntimeError, match="remote unreachable"),
+    ):
+        oxen_push(tmp_path)
