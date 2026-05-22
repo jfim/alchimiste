@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import mlflow
+from hydra.core.hydra_config import HydraConfig
 
 from alchimiste.cleaner.data.oxen_meta import OxenMeta
 from alchimiste.cleaner.models.base import TrainingCallbacks
@@ -224,9 +225,24 @@ def _flat_params(cfg: DictConfig, prefix: str = "") -> dict[str, str]:
 def _run_name(cfg: DictConfig) -> str:
     """Readable run name so a sweep is scannable in the UI without
     drilling into tags. Auto-generated names ("abundant-cow-23") make
-    parallel-experiment comparison painful."""
+    parallel-experiment comparison painful. Hydra's run timestamp is
+    appended so back-to-back runs with the same arch+seed remain
+    distinguishable."""
     arch = getattr(cfg.model, "name", "unknown")
-    return f"{arch}-seed{cfg.seed}"
+    base = f"{arch}-seed{cfg.seed}"
+    suffix = _hydra_run_stamp()
+    return f"{base}-{suffix}" if suffix else base
+
+
+def _hydra_run_stamp() -> str | None:
+    """Basename of the Hydra runtime output dir (e.g. "03-29-46"); None
+    when called outside a Hydra-managed run (unit tests)."""
+    try:
+        output_dir = HydraConfig.get().runtime.output_dir
+    except ValueError:
+        return None
+    p = Path(output_dir)
+    return f"{p.parent.name}_{p.name}"
 
 
 def _namespaced_metric_key(name: str, *, default_ns: str = "val") -> str:

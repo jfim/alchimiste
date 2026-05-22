@@ -122,6 +122,8 @@ def _compose_test_cfg(oxen_dir: Path, hydra_output_dir: Path, tracking_uri: str 
             config_name="config",
             overrides=[
                 f"data.oxen_dir={oxen_dir}",
+                # Synthetic articles are << 1 KB; disable the prod filter.
+                "data.min_bytes=0",
                 "~model",
                 "+model.module=" + _STUB_MODULE_NAME,
                 "+model.name=stub_for_loop_test",
