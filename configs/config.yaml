@@ -1,0 +1,17 @@
+# Top-level Hydra config for the text cleaner training pipeline.
+# Composes the data / model / training / eval sub-configs and adds
+# mlflow + reproducibility settings.
+
+defaults:
+  - data: default
+  - model: encoder_hf        # default architecture; override on the CLI with `model=...`
+  - training: default
+  - eval: default
+  - _self_
+
+mlflow:
+  experiment: alchimiste-text-cleaner
+  model_name: alchimiste-text-cleaner
+  tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,file://./mlruns}
+
+seed: 17                     # NFR-001 reproducibility; also seeds data/split.py

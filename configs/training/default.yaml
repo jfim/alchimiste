@@ -1,0 +1,13 @@
+# Training-loop config — hyperparameters and device selection.
+
+batch_size: 8
+learning_rate: 3.0e-5
+epochs: 6
+
+# REQ-007: counteract the heavy "keep"-class imbalance. To be revisited
+# after the first end-to-end run.
+class_weight_drop: 5.0
+
+# NFR-003: training may use a GPU; inference is CPU-only.
+# "auto" -> cuda if available, else cpu.
+device: auto

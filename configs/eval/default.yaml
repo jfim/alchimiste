@@ -1,0 +1,18 @@
+# Evaluation config — IoU thresholds, threshold-selection sweep, smell flags.
+
+# REQ-009: primary metric is IoU over codepoint ranges.
+primary_iou: 0.5
+report_iou: [0.5, 0.9, 1.0]
+
+# NFR-002: precision floor at the selected operating threshold.
+precision_floor: 0.85
+
+# Validation-set threshold sweep — see design.md § 5.3.
+threshold_sweep:
+  min: 0.30
+  max: 0.90
+  step: 0.05
+
+# REQ-003 smell flag: articles with > N predicted drop ranges are
+# flagged for human review (not auto-failed).
+excessive_ranges_threshold: 6
