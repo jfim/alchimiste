@@ -11,3 +11,41 @@ class_weight_drop: 5.0
 # NFR-003: training may use a GPU; inference is CPU-only.
 # "auto" -> cuda if available, else cpu.
 device: auto
+
+# --- Optimization & memory knobs (all no-op at their defaults) ---
+
+# Accumulate gradients over N micro-batches before stepping. Effective
+# batch size = batch_size * grad_accum_steps. Use to keep effective batch
+# constant when batch_size is dropped for memory reasons.
+grad_accum_steps: 1
+
+# Freeze the encoder and train only the classifier head. Useful when
+# the dataset is small or to isolate head-architecture effects.
+freeze_backbone: false
+
+# AdamW weight decay. PyTorch default.
+weight_decay: 0.01
+
+# Linear warmup fraction of total optimizer steps, followed by linear
+# decay to zero. 0.0 disables the scheduler entirely (constant LR).
+warmup_ratio: 0.0
+
+# Global gradient-norm clip. 0.0 disables clipping.
+max_grad_norm: 0.0
+
+# Mixed precision: "fp32" (default), "bf16" (recommended on Ampere+),
+# or "fp16" (uses GradScaler on CUDA to avoid underflow).
+precision: fp32
+
+# Trade ~30% compute for big VRAM savings via HF's gradient checkpointing.
+# Useful for long contexts (ModernBERT @ 8k) on tight GPUs.
+gradient_checkpointing: false
+
+# Cross-entropy label smoothing. Softens hard 0/1 targets; small values
+# (e.g. 0.05-0.1) can help with noisy boundary labels.
+label_smoothing: 0.0
+
+# Multiplier applied to the *head*'s learning rate (head_lr = learning_rate
+# * head_lr_multiplier). The freshly-init'd classifier often wants a
+# higher LR than the pretrained backbone — especially under freezing.
+head_lr_multiplier: 1.0

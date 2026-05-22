@@ -15,6 +15,7 @@ tune CPU-only behavior.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,7 +23,7 @@ from typing import TYPE_CHECKING
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoModelForTokenClassification, AutoTokenizer
+from transformers import AutoModelForTokenClassification, AutoTokenizer, get_linear_schedule_with_warmup
 
 from alchimiste.cleaner.data.align import (
     LABEL_DROP,
@@ -79,39 +80,113 @@ class Tagger:
         device = _select_device(training_cfg.get("device", "auto"))
         self.model.to(device)
 
+        # Optional: shrink the backbone's activation memory for long contexts.
+        # Trades ~30% compute for big VRAM savings; HF's flag handles the rest.
+        if bool(training_cfg.get("gradient_checkpointing", False)):
+            self.model.gradient_checkpointing_enable()
+            self.model.config.use_cache = False
+
+        # Optional: freeze the encoder, train only the classifier head.
+        # HF's `XxxForTokenClassification` exposes the head as `.classifier`
+        # across the BERT family (distilbert, roberta, bert, modernbert).
+        if bool(training_cfg.get("freeze_backbone", False)):
+            for name, p in self.model.named_parameters():
+                if not name.startswith("classifier"):
+                    p.requires_grad = False
+
         loss_fn = _build_loss(
             class_weight_drop=float(training_cfg.get("class_weight_drop", 1.0)),
+            label_smoothing=float(training_cfg.get("label_smoothing", 0.0)),
             device=device,
         )
 
+        batch_size = int(training_cfg.get("batch_size", 8))
         loader = DataLoader(
             _PaddedDataset(train, pad_token_id=self.tokenizer.pad_token_id or 0),
-            batch_size=int(training_cfg.get("batch_size", 8)),
+            batch_size=batch_size,
             shuffle=True,
             collate_fn=_PaddedDataset.collate,
         )
 
+        # Two param groups so the freshly-init'd head can learn faster than
+        # the pretrained backbone. `head_lr_multiplier=1.0` collapses to a
+        # single effective LR.
+        base_lr = float(training_cfg.get("learning_rate", 3.0e-5))
+        head_mult = float(training_cfg.get("head_lr_multiplier", 1.0))
+        weight_decay = float(training_cfg.get("weight_decay", 0.01))
+        backbone_params = [p for n, p in self.model.named_parameters()
+                           if not n.startswith("classifier") and p.requires_grad]
+        head_params = [p for n, p in self.model.named_parameters()
+                       if n.startswith("classifier") and p.requires_grad]
         optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=float(training_cfg.get("learning_rate", 3.0e-5)),
+            [
+                {"params": backbone_params, "lr": base_lr},
+                {"params": head_params, "lr": base_lr * head_mult},
+            ],
+            weight_decay=weight_decay,
         )
 
+        # Effective batch = batch_size * grad_accum_steps; the scheduler is
+        # stepped per optimizer-step, not per micro-batch.
+        accum_steps = max(int(training_cfg.get("grad_accum_steps", 1)), 1)
         epochs = int(training_cfg.get("epochs", 1))
+        steps_per_epoch = max(len(loader) // accum_steps, 1)
+        total_opt_steps = steps_per_epoch * epochs
+
+        warmup_ratio = float(training_cfg.get("warmup_ratio", 0.0))
+        scheduler = None
+        if warmup_ratio > 0.0 and total_opt_steps > 0:
+            scheduler = get_linear_schedule_with_warmup(
+                optimizer,
+                num_warmup_steps=int(total_opt_steps * warmup_ratio),
+                num_training_steps=total_opt_steps,
+            )
+
+        max_grad_norm = float(training_cfg.get("max_grad_norm", 0.0))
+
+        precision = str(training_cfg.get("precision", "fp32")).lower()
+        autocast_ctx, grad_scaler = _build_amp(precision, device)
+
         step = 0
+        micro_step = 0
+        optimizer.zero_grad()
         for epoch in range(epochs):
             self.model.train()
             epoch_loss = 0.0
             n_batches = 0
             for batch in loader:
                 batch = {k: v.to(device) for k, v in batch.items()}
-                logits = self.model(
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
-                ).logits  # (B, T, 2)
-                loss = loss_fn(logits.view(-1, _NUM_LABELS), batch["labels"].view(-1))
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                with autocast_ctx():
+                    logits = self.model(
+                        input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                    ).logits  # (B, T, 2)
+                    loss = loss_fn(
+                        logits.view(-1, _NUM_LABELS),
+                        batch["labels"].view(-1),
+                    )
+                # Scale so accumulated gradients match a single forward over
+                # the effective batch.
+                scaled_loss = loss / accum_steps
+                if grad_scaler is not None:
+                    grad_scaler.scale(scaled_loss).backward()
+                else:
+                    scaled_loss.backward()
+
+                micro_step += 1
+                if micro_step % accum_steps == 0:
+                    if max_grad_norm > 0.0:
+                        if grad_scaler is not None:
+                            grad_scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
+                    if grad_scaler is not None:
+                        grad_scaler.step(optimizer)
+                        grad_scaler.update()
+                    else:
+                        optimizer.step()
+                    if scheduler is not None:
+                        scheduler.step()
+                    optimizer.zero_grad()
 
                 callbacks.on_batch_end(step, float(loss.item()))
                 epoch_loss += float(loss.item())
@@ -218,12 +293,37 @@ def _select_device(device_str: str) -> torch.device:
     return torch.device("cpu")
 
 
-def _build_loss(*, class_weight_drop: float, device: torch.device) -> nn.Module:
+def _build_loss(
+    *,
+    class_weight_drop: float,
+    label_smoothing: float,
+    device: torch.device,
+) -> nn.Module:
     """Per-token weighted cross-entropy. The drop class gets a configurable
     multiplier (REQ-007); the keep class is weight 1.0; LABEL_IGNORE tokens
-    are skipped via the standard `ignore_index`."""
+    are skipped via the standard `ignore_index`. Optional label smoothing
+    softens hard 0/1 targets — useful when boundary tokens are noisily
+    labeled."""
     weights = torch.tensor([1.0, float(class_weight_drop)], device=device)
-    return nn.CrossEntropyLoss(weight=weights, ignore_index=LABEL_IGNORE)
+    return nn.CrossEntropyLoss(
+        weight=weights,
+        ignore_index=LABEL_IGNORE,
+        label_smoothing=float(label_smoothing),
+    )
+
+
+def _build_amp(precision: str, device: torch.device):
+    """Return (autocast_context_factory, grad_scaler_or_None) for the
+    chosen mixed-precision mode. fp32 is a no-op; bf16 needs no scaler;
+    fp16 requires a GradScaler to avoid gradient underflow."""
+    if precision == "bf16":
+        ctx = lambda: torch.autocast(device_type=device.type, dtype=torch.bfloat16)  # noqa: E731
+        return ctx, None
+    if precision == "fp16":
+        ctx = lambda: torch.autocast(device_type=device.type, dtype=torch.float16)  # noqa: E731
+        scaler = torch.amp.GradScaler(device.type) if device.type == "cuda" else None
+        return ctx, scaler
+    return contextlib.nullcontext, None
 
 
 class _PaddedDataset(Dataset):
