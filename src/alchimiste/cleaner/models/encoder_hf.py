@@ -62,10 +62,7 @@ class Tagger:
         articles: list[LabeledArticle],
         max_seq_len: int,
     ) -> list[TokenizedExample]:
-        return [
-            tokenize_and_align(a, self.tokenizer, max_seq_len=max_seq_len)
-            for a in articles
-        ]
+        return [tokenize_and_align(a, self.tokenizer, max_seq_len=max_seq_len) for a in articles]
 
     def fit(
         self,
@@ -161,6 +158,7 @@ class Tagger:
         # Build via __init__ to get a fully-formed Tagger, then swap the
         # weights in from `src`.
         from omegaconf import DictConfig as _DC  # local to avoid heavy import at module load
+
         instance = cls(_DC({"hf_model_name": meta["hf_model_name"]}))
         instance.tokenizer = AutoTokenizer.from_pretrained(src, use_fast=True)
         instance.model = AutoModelForTokenClassification.from_pretrained(src)

@@ -89,6 +89,68 @@ def log_final(test_metrics: dict[str, float], artifact_dir: Path) -> None:
         mlflow.log_artifacts(str(artifact_dir))
 
 
+# Soft warning threshold for the registered model footprint. Lives here
+# so the training loop can call it without re-deriving the constant.
+_ARTIFACT_SIZE_WARN_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB (NFR-004)
+
+
+def log_pyfunc_model(
+    artifact_dir: Path,
+    *,
+    registered_model_name: str,
+    threshold: float,
+    threshold_iou: float,
+    fell_back_to_max_precision: bool,
+) -> None:
+    """Bundle the training artifact + inference code into an mlflow pyfunc
+    and register it under `registered_model_name` (TASK-025, REQ-011).
+
+    The mlflow model contains:
+      * the saved tagger under `artifact_root/model/`
+      * the resolved Hydra config
+      * the selected threshold + sweep + final metrics + failures
+      * the alchimiste Python package (so `load_context` works with
+        only the mlflow client installed at inference time)
+    """
+    import alchimiste
+
+    package_root = Path(alchimiste.__file__).resolve().parent
+
+    # NFR-004 soft warning.
+    total_size = _dir_size_bytes(artifact_dir)
+    if total_size > _ARTIFACT_SIZE_WARN_BYTES:
+        import warnings
+
+        warnings.warn(
+            f"artifact_dir is {total_size / (1024**3):.2f} GB; mlflow registry "
+            f"will accept it but consider whether the architecture is right-sized "
+            f"(NFR-004 soft cap 2 GB).",
+            stacklevel=2,
+        )
+
+    # Tag the active run with the chosen threshold.
+    mlflow.set_tag(TAG_THRESHOLD_VALUE, f"{threshold:.6f}")
+    mlflow.set_tag(TAG_THRESHOLD_IOU, f"{threshold_iou:.2f}")
+    if fell_back_to_max_precision:
+        mlflow.set_tag(TAG_THRESHOLD_FALLBACK, "true")
+
+    # `artifacts` lets `CleanerModel.load_context` find the per-run
+    # files without us baking absolute paths into the model.
+    from alchimiste.cleaner.inference.pyfunc import CleanerModel
+
+    mlflow.pyfunc.log_model(
+        name="model",
+        python_model=CleanerModel(),
+        artifacts={"artifact_root": str(artifact_dir)},
+        code_paths=[str(package_root)],
+        registered_model_name=registered_model_name,
+    )
+
+
+def _dir_size_bytes(path: Path) -> int:
+    return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
+
+
 def build_callbacks() -> TrainingCallbacks:
     """A `TrainingCallbacks` whose hooks route to `log_batch` / `log_epoch`."""
     return TrainingCallbacks(on_batch_end=log_batch, on_epoch_end=log_epoch)

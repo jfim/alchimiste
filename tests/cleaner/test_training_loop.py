@@ -113,16 +113,21 @@ def _synthesize_oxen_tree(tmp_path: Path, n_articles: int = 10) -> Path:
     return tmp_path
 
 
-def _compose_test_cfg(oxen_dir: Path, hydra_output_dir: Path):
+def _compose_test_cfg(oxen_dir: Path, hydra_output_dir: Path, tracking_uri: str | None = None):
     if GlobalHydra.instance().is_initialized():
         GlobalHydra.instance().clear()
+    tracking = tracking_uri or f"file://{hydra_output_dir.parent}/mlruns"
     with initialize_config_dir(config_dir=CONFIGS_DIR, version_base=None):
         cfg = compose(
             config_name="config",
             overrides=[
                 f"data.oxen_dir={oxen_dir}",
-                "~model",  # encoder_hf.yaml not yet present
+                "~model",
                 "+model.module=" + _STUB_MODULE_NAME,
+                "+model.name=stub_for_loop_test",
+                f"mlflow.tracking_uri={tracking}",
+                f"mlflow.experiment=alchimiste_test_loop_{hydra_output_dir.name}",
+                f"mlflow.model_name=alchimiste_test_loop_{hydra_output_dir.name}",
             ],
             return_hydra_config=True,
         )
@@ -173,9 +178,13 @@ def test_train_writes_only_under_hydra_output_dir(tmp_path: Path) -> None:
 
     # The output dir contains the run's artifacts.
     assert list(out_dir.iterdir()), "expected artifacts under output_dir"
-    # No siblings under tmp_path other than oxen + the isolated run.
+    # Under tmp_path we expect oxen (input), isolated_run (the run's
+    # hydra output dir), and mlruns (the per-test mlflow file store).
+    # Nothing else should leak — that would mean train() wrote outside
+    # its allotted paths.
     siblings = {p.name for p in tmp_path.iterdir()}
-    assert siblings == {"oxen", "isolated_run"}
+    assert siblings <= {"oxen", "isolated_run", "mlruns"}
+    assert "isolated_run" in siblings
 
 
 def test_parallel_runs_get_disjoint_output_dirs(tmp_path: Path) -> None:
