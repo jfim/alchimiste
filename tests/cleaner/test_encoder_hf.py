@@ -226,3 +226,80 @@ def test_label_constants_re_exported() -> None:
     assert encoder_hf.LABEL_KEEP == LABEL_KEEP
     assert encoder_hf.LABEL_DROP == LABEL_DROP
     assert encoder_hf.LABEL_IGNORE == LABEL_IGNORE
+
+
+def _train_with_save_best(model_cfg, save_best: bool, epochs: int = 4):
+    """Helper: train a fresh tagger for `epochs` epochs and return
+    (per-epoch metric dicts, the trained tagger). Uses the same tiny
+    imbalanced corpus as the other tests in this file."""
+    articles = _imbalanced_articles(n_clean=4, n_with_drops=3)
+    cfg = OmegaConf.create(OmegaConf.to_container(model_cfg, resolve=True))
+    cfg._training["epochs"] = epochs
+    cfg._training["save_best_on_val"] = save_best
+    tagger = encoder_hf.Tagger(cfg)
+    examples = tagger.tokenize(articles, max_seq_len=64)
+    history: list[dict] = []
+    cb = TrainingCallbacks(on_epoch_end=lambda step, m: history.append(dict(m)))
+    tagger.fit(examples, examples[:3], cfg, cb)
+    return history, tagger, examples
+
+
+def test_save_best_on_val_off_does_not_record_best(model_cfg) -> None:
+    """When `save_best_on_val=false` (default), the loop must not log
+    `val/best_val_loss` or `val/best_epoch` — staying out of the
+    metric namespace keeps the existing UI / dashboards stable."""
+    history, _, _ = _train_with_save_best(model_cfg, save_best=False, epochs=3)
+    assert all("val/best_val_loss" not in entry for entry in history)
+    assert all("val/best_epoch" not in entry for entry in history)
+
+
+def test_save_best_on_val_records_best_loss_and_epoch(model_cfg) -> None:
+    """When the knob is on, the loop must log `val/best_val_loss` =
+    min over per-epoch val_loss, plus the epoch index where that
+    minimum was hit."""
+    history, _, _ = _train_with_save_best(model_cfg, save_best=True, epochs=4)
+    per_epoch_val = [h["val_loss"] for h in history if "val_loss" in h]
+    best_entries = [h for h in history if "val/best_val_loss" in h]
+    assert len(per_epoch_val) == 4
+    assert len(best_entries) == 1, "expected exactly one best-on-val summary entry"
+    summary = best_entries[0]
+    expected_best = min(per_epoch_val)
+    assert abs(summary["val/best_val_loss"] - expected_best) < 1e-6, (
+        f"logged best val_loss {summary['val/best_val_loss']} != min "
+        f"per-epoch val_loss {expected_best}"
+    )
+    expected_epoch = per_epoch_val.index(expected_best)
+    assert int(summary["val/best_epoch"]) == expected_epoch
+
+
+def test_save_best_on_val_restores_weights_not_last_epoch(model_cfg) -> None:
+    """Behavioral check: predictions after fit() with save_best=true
+    must reflect the best-epoch weights, not the final-epoch weights.
+
+    Verified by comparing val_loss recomputed at the restored weights
+    against the logged best_val_loss — they should match within
+    numerical noise.
+    """
+    import torch  # local to keep import cost off the importorskip path
+
+    history, tagger, examples = _train_with_save_best(
+        model_cfg, save_best=True, epochs=4
+    )
+    # Use the same loss the trainer used internally.
+    from alchimiste.cleaner.models.encoder_hf import _build_loss
+
+    loss_fn = _build_loss(
+        class_weight_drop=1.0,
+        label_smoothing=0.0,
+        device=torch.device("cpu"),
+    )
+    val_loss_now = tagger._quick_val_loss(examples[:3], loss_fn, torch.device("cpu"))[
+        "val_loss"
+    ]
+    best_entry = next(h for h in history if "val/best_val_loss" in h)
+    # The restored weights should produce a val_loss matching the logged
+    # best (small float drift okay; CPU is generally bit-stable).
+    assert abs(val_loss_now - best_entry["val/best_val_loss"]) < 1e-4, (
+        f"after fit() the restored tagger gave val_loss={val_loss_now} but the "
+        f"logged best was {best_entry['val/best_val_loss']} — restoration didn't take"
+    )
