@@ -1,8 +1,10 @@
-"""HuggingFace encoder + 2-class token-classification head (TASK-015, REQ-005).
+"""HuggingFace encoder + pluggable head (TASK-015, REQ-005).
 
-This is the first concrete `TokenTagger` implementation. It wraps any
-HF encoder addressable by name (DistilBERT, MiniLM, ModernBERT, …) with
-a per-token keep/drop head and trains it via plain PyTorch.
+This is the canonical `TokenTagger` implementation. It wraps any HF
+encoder addressable by name (DistilBERT, MiniLM, ModernBERT, …) and
+delegates classification to a `Head` chosen via the `model.head:` config
+block — see `models/heads.py` for the available types and how to add
+new ones.
 
 Class imbalance (REQ-007 / NFR-002): a `class_weight_drop` config knob
 scales the drop class in the cross-entropy loss. The default value of
@@ -23,7 +25,7 @@ from typing import TYPE_CHECKING
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoModelForTokenClassification, AutoTokenizer, get_linear_schedule_with_warmup
+from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warmup
 
 from alchimiste.cleaner.data.align import (
     LABEL_DROP,
@@ -34,12 +36,14 @@ from alchimiste.cleaner.data.align import (
 )
 from alchimiste.cleaner.data.loader import LabeledArticle
 from alchimiste.cleaner.models.base import TrainingCallbacks
+from alchimiste.cleaner.models.heads import Head, build_head
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
 
 _NUM_LABELS = 2  # keep / drop
 _METADATA_FILENAME = "alchimiste_meta.json"
+_HEAD_STATE_FILENAME = "head_state.pt"
 
 
 class Tagger:
@@ -49,8 +53,11 @@ class Tagger:
         self.cfg = cfg
         self._hf_model_name: str = cfg.hf_model_name
         self.tokenizer = AutoTokenizer.from_pretrained(self._hf_model_name, use_fast=True)
-        self.model = AutoModelForTokenClassification.from_pretrained(
-            self._hf_model_name,
+        self.encoder = AutoModel.from_pretrained(self._hf_model_name)
+        self._head_cfg = _resolve_head_cfg(cfg)
+        self.head: Head = build_head(
+            self._head_cfg,
+            hidden_size=self.encoder.config.hidden_size,
             num_labels=_NUM_LABELS,
         )
 
@@ -78,21 +85,19 @@ class Tagger:
         training_cfg = _resolve_training_cfg(cfg)
 
         device = _select_device(training_cfg.get("device", "auto"))
-        self.model.to(device)
+        self.encoder.to(device)
+        self.head.to(device)
 
-        # Optional: shrink the backbone's activation memory for long contexts.
+        # Optional: shrink the encoder's activation memory for long contexts.
         # Trades ~30% compute for big VRAM savings; HF's flag handles the rest.
         if bool(training_cfg.get("gradient_checkpointing", False)):
-            self.model.gradient_checkpointing_enable()
-            self.model.config.use_cache = False
+            self.encoder.gradient_checkpointing_enable()
+            self.encoder.config.use_cache = False
 
-        # Optional: freeze the encoder, train only the classifier head.
-        # HF's `XxxForTokenClassification` exposes the head as `.classifier`
-        # across the BERT family (distilbert, roberta, bert, modernbert).
+        # Optional: freeze the encoder, train only the head.
         if bool(training_cfg.get("freeze_backbone", False)):
-            for name, p in self.model.named_parameters():
-                if not name.startswith("classifier"):
-                    p.requires_grad = False
+            for p in self.encoder.parameters():
+                p.requires_grad = False
 
         loss_fn = _build_loss(
             class_weight_drop=float(training_cfg.get("class_weight_drop", 1.0)),
@@ -114,10 +119,8 @@ class Tagger:
         base_lr = float(training_cfg.get("learning_rate", 3.0e-5))
         head_mult = float(training_cfg.get("head_lr_multiplier", 1.0))
         weight_decay = float(training_cfg.get("weight_decay", 0.01))
-        backbone_params = [p for n, p in self.model.named_parameters()
-                           if not n.startswith("classifier") and p.requires_grad]
-        head_params = [p for n, p in self.model.named_parameters()
-                       if n.startswith("classifier") and p.requires_grad]
+        backbone_params = [p for p in self.encoder.parameters() if p.requires_grad]
+        head_params = [p for p in self.head.parameters() if p.requires_grad]
         optimizer = torch.optim.AdamW(
             [
                 {"params": backbone_params, "lr": base_lr},
@@ -151,20 +154,21 @@ class Tagger:
         micro_step = 0
         optimizer.zero_grad()
         for epoch in range(epochs):
-            self.model.train()
+            self.encoder.train()
+            self.head.train()
             epoch_loss = 0.0
             n_batches = 0
             for batch in loader:
                 batch = {k: v.to(device) for k, v in batch.items()}
                 with autocast_ctx():
-                    logits = self.model(
+                    head_out = self._forward(
                         input_ids=batch["input_ids"],
                         attention_mask=batch["attention_mask"],
-                    ).logits  # (B, T, 2)
-                    loss = loss_fn(
-                        logits.view(-1, _NUM_LABELS),
-                        batch["labels"].view(-1),
+                        labels=batch["labels"],
+                        loss_fn=loss_fn,
                     )
+                    loss = head_out.loss
+                assert loss is not None  # labels were passed
                 # Scale so accumulated gradients match a single forward over
                 # the effective batch.
                 scaled_loss = loss / accum_steps
@@ -178,7 +182,10 @@ class Tagger:
                     if max_grad_norm > 0.0:
                         if grad_scaler is not None:
                             grad_scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
+                        torch.nn.utils.clip_grad_norm_(
+                            list(self.encoder.parameters()) + list(self.head.parameters()),
+                            max_grad_norm,
+                        )
                     if grad_scaler is not None:
                         grad_scaler.step(optimizer)
                         grad_scaler.update()
@@ -210,42 +217,71 @@ class Tagger:
     ) -> list[list[float]]:
         if not examples:
             return []
-        device = next(self.model.parameters()).device
-        self.model.eval()
+        device = next(self.encoder.parameters()).device
+        self.encoder.eval()
+        self.head.eval()
         out: list[list[float]] = []
         with torch.no_grad():
             for ex in examples:
                 input_ids = torch.tensor([ex.input_ids], device=device)
                 attn = torch.ones_like(input_ids)
-                logits = self.model(input_ids=input_ids, attention_mask=attn).logits
-                probs = torch.softmax(logits, dim=-1)[0, :, LABEL_DROP]
+                head_out = self._forward(input_ids=input_ids, attention_mask=attn)
+                probs = torch.softmax(head_out.logits, dim=-1)[0, :, LABEL_DROP]
                 out.append([float(p) for p in probs.tolist()])
         return out
 
     def save(self, dst: Path) -> None:
         dst.mkdir(parents=True, exist_ok=True)
-        self.model.save_pretrained(dst)
+        self.encoder.save_pretrained(dst)
         self.tokenizer.save_pretrained(dst)
+        torch.save(self.head.state_dict(), dst / _HEAD_STATE_FILENAME)
         (dst / _METADATA_FILENAME).write_text(
-            json.dumps({"hf_model_name": self._hf_model_name}, indent=2) + "\n",
+            json.dumps(
+                {"hf_model_name": self._hf_model_name, "head": dict(self._head_cfg)},
+                indent=2,
+            )
+            + "\n",
             encoding="utf-8",
         )
 
     @classmethod
     def load(cls, src: Path) -> Tagger:
         meta = json.loads((src / _METADATA_FILENAME).read_text(encoding="utf-8"))
-        # Build via __init__ to get a fully-formed Tagger, then swap the
-        # weights in from `src`.
         from omegaconf import DictConfig as _DC  # local to avoid heavy import at module load
 
-        instance = cls(_DC({"hf_model_name": meta["hf_model_name"]}))
+        # Reconstruct the model sub-config and instantiate via __init__, then
+        # swap weights in. `head` defaults to `{type: linear}` so artifacts
+        # produced by the pre-refactor code (no head block in meta) load
+        # with the implicit linear head their AutoModelForTokenClassification
+        # checkpoint encoded.
+        cfg = _DC({
+            "hf_model_name": meta["hf_model_name"],
+            "head": meta.get("head", {"type": "linear"}),
+        })
+        instance = cls(cfg)
         instance.tokenizer = AutoTokenizer.from_pretrained(src, use_fast=True)
-        instance.model = AutoModelForTokenClassification.from_pretrained(src)
+        instance.encoder = AutoModel.from_pretrained(src)
+        head_state_path = src / _HEAD_STATE_FILENAME
+        if head_state_path.exists():
+            instance.head.load_state_dict(
+                torch.load(head_state_path, map_location="cpu", weights_only=True)
+            )
         return instance
 
     # ------------------------------------------------------------------ #
     # Helpers                                                            #
     # ------------------------------------------------------------------ #
+
+    def _forward(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        labels: torch.Tensor | None = None,
+        loss_fn: nn.Module | None = None,
+    ):
+        enc = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+        return self.head(enc.last_hidden_state, attention_mask, labels=labels, loss_fn=loss_fn)
 
     def _quick_val_loss(
         self,
@@ -255,7 +291,8 @@ class Tagger:
     ) -> dict[str, float]:
         if not val:
             return {"val_loss": float("nan")}
-        self.model.eval()
+        self.encoder.eval()
+        self.head.eval()
         total = 0.0
         n = 0
         with torch.no_grad():
@@ -263,9 +300,14 @@ class Tagger:
                 input_ids = torch.tensor([ex.input_ids], device=device)
                 labels = torch.tensor([ex.labels], device=device)
                 attn = torch.ones_like(input_ids)
-                logits = self.model(input_ids=input_ids, attention_mask=attn).logits
-                loss = loss_fn(logits.view(-1, _NUM_LABELS), labels.view(-1))
-                total += float(loss.item())
+                head_out = self._forward(
+                    input_ids=input_ids,
+                    attention_mask=attn,
+                    labels=labels,
+                    loss_fn=loss_fn,
+                )
+                assert head_out.loss is not None
+                total += float(head_out.loss.item())
                 n += 1
         return {"val_loss": total / max(n, 1)}
 
@@ -280,6 +322,21 @@ def _resolve_training_cfg(model_cfg: DictConfig) -> DictConfig | dict:
     we look at a sibling `training` group attached by the loop (if any) or
     fall back to baked-in defaults. The loop attaches it as `_training`."""
     return getattr(model_cfg, "_training", {}) or {}
+
+
+def _resolve_head_cfg(model_cfg: DictConfig) -> dict:
+    """Plain dict so we can json-serialize it into the saved metadata."""
+    from omegaconf import OmegaConf
+
+    head = getattr(model_cfg, "head", None)
+    if head is None:
+        return {"type": "linear"}
+    if hasattr(head, "_content") or hasattr(head, "keys"):
+        try:
+            return dict(OmegaConf.to_container(head, resolve=True))  # type: ignore[arg-type]
+        except Exception:
+            return dict(head)
+    return dict(head)
 
 
 def _select_device(device_str: str) -> torch.device:

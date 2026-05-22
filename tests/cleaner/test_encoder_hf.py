@@ -164,18 +164,16 @@ def test_freeze_backbone_only_trains_classifier(model_cfg) -> None:
 
     t = encoder_hf.Tagger(cfg)
     examples = t.tokenize(articles, max_seq_len=32)
-    pre_encoder = {n: p.detach().clone() for n, p in t.model.named_parameters()
-                   if not n.startswith("classifier")}
-    pre_head = {n: p.detach().clone() for n, p in t.model.named_parameters()
-                if n.startswith("classifier")}
+    pre_encoder = {n: p.detach().clone() for n, p in t.encoder.named_parameters()}
+    pre_head = {n: p.detach().clone() for n, p in t.head.named_parameters()}
 
     t.fit(examples, examples[:1], cfg, TrainingCallbacks())
 
-    for n, p in t.model.named_parameters():
-        if n.startswith("classifier"):
-            assert not torch.equal(p.detach(), pre_head[n]), f"head param {n} did not move"
-        else:
-            assert torch.equal(p.detach(), pre_encoder[n]), f"frozen param {n} drifted"
+    for n, p in t.encoder.named_parameters():
+        assert torch.equal(p.detach(), pre_encoder[n]), f"frozen encoder param {n} drifted"
+    moved = any(not torch.equal(p.detach(), pre_head[n])
+                for n, p in t.head.named_parameters())
+    assert moved, "head params did not move during training"
 
 
 def test_grad_accum_matches_plain_step(model_cfg) -> None:
@@ -199,7 +197,7 @@ def test_grad_accum_matches_plain_step(model_cfg) -> None:
         # because we want determinism. The DataLoader still shuffles each
         # epoch, but with a fixed seed both runs draw the same permutation.
         t.fit(ex, ex[:1], cfg, TrainingCallbacks())
-        return t.model.classifier.weight.detach().clone()
+        return t.head.classifier.weight.detach().clone()
 
     plain = _trained_classifier_weight(batch_size=8, accum=1)
     accumulated = _trained_classifier_weight(batch_size=4, accum=2)
@@ -207,6 +205,21 @@ def test_grad_accum_matches_plain_step(model_cfg) -> None:
     # we just verify both runs trained and produced finite weights.
     assert plain.shape == accumulated.shape
     assert torch.isfinite(plain).all() and torch.isfinite(accumulated).all()
+
+
+def test_head_config_is_persisted_and_restored(model_cfg, tmp_path: Path) -> None:
+    """The head's config (type + kwargs) survives a save/load round-trip,
+    so a non-default head (e.g. CRF) loaded by mlflow uses the same head
+    it was trained with."""
+    cfg = OmegaConf.create(OmegaConf.to_container(model_cfg, resolve=True))
+    cfg.head = {"type": "linear", "dropout": 0.3}
+
+    t = encoder_hf.Tagger(cfg)
+    t.save(tmp_path / "art")
+    restored = encoder_hf.Tagger.load(tmp_path / "art")
+
+    assert restored.head.dropout.p == 0.3
+    assert restored._head_cfg["type"] == "linear"
 
 
 def test_label_constants_re_exported() -> None:
