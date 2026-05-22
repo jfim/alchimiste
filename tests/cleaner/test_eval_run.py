@@ -13,8 +13,7 @@ import polars as pl
 from omegaconf import OmegaConf
 
 from alchimiste.cleaner.data.align import TokenizedExample
-from alchimiste.cleaner.data.loader import LabeledArticle
-from alchimiste.cleaner.data.split import SplitsManifest, make_splits
+from alchimiste.cleaner.data.split import make_splits
 from alchimiste.cleaner.eval.run import evaluate
 
 _STUB_MODULE_NAME = "alchimiste_test_eval_stub"
