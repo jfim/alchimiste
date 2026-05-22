@@ -129,9 +129,7 @@ def train(cfg: DictConfig) -> RunResult:
             registered_model_name=cfg.mlflow.model_name,
             threshold=float(threshold_payload["threshold"]),
             threshold_iou=float(threshold_payload["iou_metric"]),
-            fell_back_to_max_precision=bool(
-                threshold_payload["fell_back_to_max_precision"]
-            ),
+            fell_back_to_max_precision=bool(threshold_payload["fell_back_to_max_precision"]),
         )
 
     return RunResult(
