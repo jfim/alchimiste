@@ -118,9 +118,7 @@ def test_train_logs_batch_loss_and_finalizes(tmp_path: Path) -> None:
     tracking_uri = f"file://{tmp_path / 'mlruns'}"
 
     cfg = _compose(oxen_dir, out_dir, tracking_uri)
-    user_cfg = OmegaConf.masked_copy(
-        cfg, ["data", "model", "training", "eval", "mlflow", "seed"]
-    )
+    user_cfg = OmegaConf.masked_copy(cfg, ["data", "model", "training", "eval", "mlflow", "seed"])
 
     result = train(user_cfg)
     assert result.artifact_dir == out_dir
