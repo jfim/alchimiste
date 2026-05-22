@@ -23,8 +23,10 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
 from alchimiste.cleaner.data.loader import LabeledArticle, load_oxen_tree
+from alchimiste.cleaner.data.oxen_meta import OxenMeta, read_commit
 from alchimiste.cleaner.data.split import SplitsManifest, make_splits
-from alchimiste.cleaner.models.base import TokenTagger, TrainingCallbacks
+from alchimiste.cleaner.models.base import TokenTagger
+from alchimiste.cleaner.training import mlflow_io
 
 _CONFIG_PATH = str(Path(__file__).resolve().parents[4] / "configs")
 
@@ -51,6 +53,18 @@ def train(cfg: DictConfig) -> RunResult:
     artifact_dir = _resolve_artifact_dir()
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
+    # Dataset provenance (REQ-014). Best-effort: if `data.oxen_dir` isn't
+    # an oxen working tree, we tag the run as "unknown" and continue —
+    # this lets unit tests run against synthesized fixtures without an
+    # oxen init. Real training is expected to point at the puller's
+    # output tree, where read_commit always succeeds.
+    oxen_meta = _try_read_oxen_meta(Path(cfg.data.oxen_dir))
+    if oxen_meta is not None and oxen_meta.dirty and not cfg.data.allow_dirty:
+        raise RuntimeError(
+            f"oxen working tree at {cfg.data.oxen_dir} is dirty; refuse to "
+            "train (REQ-014). Re-run with data.allow_dirty=true to override."
+        )
+
     tagger = _instantiate_tagger(cfg.model)
     articles = load_oxen_tree(
         cfg.data.oxen_dir,
@@ -71,24 +85,31 @@ def train(cfg: DictConfig) -> RunResult:
     val_ex = tagger.tokenize(val_arts, max_seq_len=cfg.data.max_seq_len)
     test_ex = tagger.tokenize(test_arts, max_seq_len=cfg.data.max_seq_len)
 
-    # TASK-018 will replace these with real mlflow-routing callbacks.
-    callbacks = TrainingCallbacks()
-
     # The model receives only its sub-config; expose training hyperparameters
     # via a private `_training` key so implementations can look them up
     # without parsing the whole config tree.
     model_cfg = OmegaConf.merge(cfg.model, {"_training": cfg.get("training", {})})
-    tagger.fit(train_ex, val_ex, model_cfg, callbacks)
 
-    # Smoke-call predict on val so a broken predict_token_probs surfaces
-    # immediately, not at eval time.
-    _ = tagger.predict_token_probs(val_ex)
+    # Route per-batch / per-epoch metrics into mlflow (REQ-015). If mlflow
+    # isn't configured (e.g. unit tests setting tracking_uri="" to disable),
+    # callers can call `train()` with mlflow disabled by patching this hook.
+    with mlflow_io.start_run(cfg, oxen_meta=oxen_meta):
+        callbacks = mlflow_io.build_callbacks()
+        tagger.fit(train_ex, val_ex, model_cfg, callbacks)
 
-    tagger.save(artifact_dir / "model")
+        # Smoke-call predict on val so a broken predict_token_probs
+        # surfaces immediately, not at eval time.
+        _ = tagger.predict_token_probs(val_ex)
 
-    # Persist the resolved config alongside the artifact so it can be
-    # re-loaded without re-composing (REQ-011 artifact layout).
-    OmegaConf.save(cfg, artifact_dir / "config.yaml")
+        tagger.save(artifact_dir / "model")
+
+        # Persist the resolved config alongside the artifact so it can be
+        # re-loaded without re-composing (REQ-011 artifact layout).
+        OmegaConf.save(cfg, artifact_dir / "config.yaml")
+
+        # Final test metrics + artifact bundle (REQ-015). TASK-021 fills in
+        # the actual test metric set; the call shape is stable now.
+        mlflow_io.log_final({}, artifact_dir)
 
     return RunResult(
         artifact_dir=artifact_dir,
@@ -97,6 +118,18 @@ def train(cfg: DictConfig) -> RunResult:
         val_size=len(val_ex),
         test_size=len(test_ex),
     )
+
+
+def _try_read_oxen_meta(oxen_dir: Path) -> OxenMeta | None:
+    """Best-effort `read_commit`: returns None when `oxen_dir` is not an
+    oxen working tree (so unit tests against synthesized fixtures work).
+    Re-raises any other failure so real misconfigurations are loud."""
+    try:
+        return read_commit(oxen_dir)
+    except RuntimeError as e:
+        if "oxen log failed" in str(e) or "oxen binary not found" in str(e):
+            return None
+        raise
 
 
 def _instantiate_tagger(model_cfg: DictConfig) -> TokenTagger:
