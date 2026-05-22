@@ -120,9 +120,13 @@ class Tagger:
 
             mean_epoch_loss = epoch_loss / max(n_batches, 1)
             val_metrics = self._quick_val_loss(val, loss_fn, device)
+            # Keys are namespaced explicitly. The mlflow callback applies
+            # the default `val/` namespace to bare keys, so a slash here
+            # keeps the per-epoch series in their correct ns (design.md
+            # § 5.4: train/epoch_loss vs val/val_loss).
             callbacks.on_epoch_end(
                 epoch,
-                {"train_loss": mean_epoch_loss, **val_metrics},
+                {"train/epoch_loss": mean_epoch_loss, **val_metrics},
             )
 
     def predict_token_probs(
