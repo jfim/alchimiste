@@ -33,3 +33,10 @@ min_bytes: 1024
 # compatibility — existing recipes that only set `seed` produce the
 # same split they used to.
 split_seed: ${seed}
+
+# On-disk cache for tokenized articles. Keyed by (hf_model_name,
+# max_seq_len, range_units, require_nfc, article-set sha) so a cached
+# entry is only used when every input affecting tokenization is
+# unchanged. Saves the per-run tokenization cost across distinct
+# `just train` invocations. Set to "" to disable.
+tokenization_cache_dir: .cache/tokenized

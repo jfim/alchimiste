@@ -14,8 +14,10 @@ mutable location.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
+import pickle
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +28,7 @@ import torch
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
+from alchimiste.cleaner.data.align import TokenizedExample
 from alchimiste.cleaner.data.loader import LabeledArticle, load_oxen_tree
 from alchimiste.cleaner.data.oxen_meta import OxenMeta, read_commit
 from alchimiste.cleaner.data.split import SplitsManifest, make_splits
@@ -105,14 +108,11 @@ def train_seeds(cfg: DictConfig, seeds: list[int]) -> list[RunResult]:
 
     # Tokenize every article exactly once. Tokenization is deterministic
     # given (text, tokenizer, max_seq_len) — no seed dependency — so the
-    # cache is safe to share across seeds. Use a throwaway tagger just
-    # for its tokenizer; per-seed taggers get fresh model weights below.
+    # cache is safe to share across seeds. Cache hits avoid even
+    # constructing the tagger; on a miss we fall back to instantiating
+    # one just for its tokenizer.
     _seed_all_rngs(int(seeds[0]))  # only affects tokenizer-init RNG, harmless
-    tokenizer_tagger = _instantiate_tagger(cfg.model)
-    all_tokenized = {
-        a.item_id: tokenizer_tagger.tokenize([a], max_seq_len=cfg.data.max_seq_len)[0]
-        for a in articles
-    }
+    all_tokenized = _tokenize_with_cache(cfg, articles)
 
     results: list[RunResult] = []
     for i, seed in enumerate(seeds):
@@ -183,15 +183,13 @@ def _train_one(
     # pristine pretrained encoder, not from seed `n`'s fine-tuned weights.
     tagger = _instantiate_tagger(cfg.model)
 
-    if tokenized_by_id is not None:
-        # Multi-seed path: reuse pre-tokenized examples.
-        train_ex = [tokenized_by_id[a.item_id] for a in train_arts]
-        val_ex = [tokenized_by_id[a.item_id] for a in val_arts]
-        test_ex = [tokenized_by_id[a.item_id] for a in test_arts]
-    else:
-        train_ex = tagger.tokenize(train_arts, max_seq_len=cfg.data.max_seq_len)
-        val_ex = tagger.tokenize(val_arts, max_seq_len=cfg.data.max_seq_len)
-        test_ex = tagger.tokenize(test_arts, max_seq_len=cfg.data.max_seq_len)
+    if tokenized_by_id is None:
+        # Single-seed path: hit the on-disk tokenization cache for free
+        # speedup on repeat invocations with the same data + tokenizer.
+        tokenized_by_id = _tokenize_with_cache(cfg, articles, tagger=tagger)
+    train_ex = [tokenized_by_id[a.item_id] for a in train_arts]
+    val_ex = [tokenized_by_id[a.item_id] for a in val_arts]
+    test_ex = [tokenized_by_id[a.item_id] for a in test_arts]
 
     # The model receives only its sub-config; expose training hyperparameters
     # via a private `_training` key so implementations can look them up
@@ -259,6 +257,104 @@ def _seeds_from_cfg(cfg: DictConfig) -> list[int] | None:
     except (TypeError, ValueError) as e:
         raise ValueError(f"cfg.seeds must be int / list[int] / 'a,b,c'; got {raw!r}") from e
     return ints if ints else None
+
+
+# Bump when the cached payload format would silently mis-deserialize
+# (e.g. TokenizedExample gains a field). All caches with a different
+# version are ignored on read.
+_TOKENIZATION_CACHE_SCHEMA = "v1"
+
+
+def _tokenize_with_cache(
+    cfg: DictConfig,
+    articles: list[LabeledArticle],
+    *,
+    tagger: TokenTagger | None = None,
+) -> dict[str, TokenizedExample]:
+    """Tokenize every article. Memoizes to disk so the same (data,
+    tokenizer, max_seq_len) doesn't get re-tokenized across distinct
+    `just train` invocations.
+
+    Disabled by setting `data.tokenization_cache_dir` to an empty
+    string. The on-disk cache is small (~few MB for the current corpus)
+    and gitignored.
+    """
+    cache_dir_str = str(cfg.data.get("tokenization_cache_dir", "") or "").strip()
+    cache_path: Path | None = None
+    if cache_dir_str:
+        key = _tokenization_cache_key(cfg, articles)
+        cache_path = Path(cache_dir_str) / f"{key}.pkl"
+        if cache_path.exists():
+            try:
+                with cache_path.open("rb") as fh:
+                    payload = pickle.load(fh)
+                if payload.get("schema") == _TOKENIZATION_CACHE_SCHEMA:
+                    cached: dict[str, TokenizedExample] = payload["tokenized"]
+                    # Defensive: cache key collisions are astronomically
+                    # unlikely, but verify the keyspace matches.
+                    if set(cached.keys()) == {a.item_id for a in articles}:
+                        return cached
+            except (pickle.UnpicklingError, OSError, KeyError):
+                # Corrupt or stale cache → fall through to re-tokenize
+                # and overwrite below.
+                pass
+
+    if tagger is None:
+        tagger = _instantiate_tagger(cfg.model)
+    tokenized = {
+        a.item_id: tagger.tokenize([a], max_seq_len=cfg.data.max_seq_len)[0]
+        for a in articles
+    }
+
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        # Write to a tmp file then rename — avoids leaving a corrupt
+        # cache around if the process is killed mid-write.
+        tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        with tmp.open("wb") as fh:
+            pickle.dump(
+                {"schema": _TOKENIZATION_CACHE_SCHEMA, "tokenized": tokenized},
+                fh,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+        tmp.replace(cache_path)
+    return tokenized
+
+
+def _tokenization_cache_key(cfg: DictConfig, articles: list[LabeledArticle]) -> str:
+    """SHA256-derived cache key covering everything tokenization depends on.
+
+    Inputs to the key:
+      * HF model name (different tokenizer family = different output).
+      * max_seq_len (truncation point).
+      * range_units (label projection unit; affects `discard_ranges` math).
+      * require_nfc (whether NFC normalization runs on read).
+      * The article set, identified by (item_id, content_sha256) pairs —
+        any data change flips the hash.
+      * Schema version constant, so a format bump invalidates old caches.
+    """
+    h = hashlib.sha256()
+    h.update(_TOKENIZATION_CACHE_SCHEMA.encode())
+    h.update(b"\x00")
+    # Stub taggers in tests don't have `hf_model_name`; the architecture
+    # `name` is always set and discriminates between tokenizer families
+    # cleanly enough for any non-HF backend.
+    h.update(
+        str(cfg.model.get("hf_model_name", cfg.model.get("name", "unknown"))).encode()
+    )
+    h.update(b"\x00")
+    h.update(str(int(cfg.data.max_seq_len)).encode())
+    h.update(b"\x00")
+    h.update(str(cfg.data.range_units).encode())
+    h.update(b"\x00")
+    h.update(str(bool(cfg.data.require_nfc)).encode())
+    h.update(b"\x00")
+    for a in sorted(articles, key=lambda x: x.item_id):
+        h.update(a.item_id.encode())
+        h.update(b"\x00")
+        h.update(a.content_sha256.encode())
+        h.update(b"\x00")
+    return h.hexdigest()[:24]
 
 
 def _seed_all_rngs(seed: int) -> None:
