@@ -5,7 +5,8 @@ from unittest.mock import patch
 
 import polars as pl
 
-from alchimiste.cli import pull
+from alchimiste import cli as cli_module
+from alchimiste.cli import _load_local_config_value, pull
 
 
 def _make_parquet(rows: list[dict]) -> bytes:
@@ -112,3 +113,28 @@ def test_pull_skips_push_when_no_new_commit(tmp_path: Path, httpx_mock):
     mock_push.assert_not_called()
     assert result["commit"] is None
     assert result["pushed"] is False
+
+
+def test_load_local_config_value_returns_none_when_absent(tmp_path: Path):
+    with patch.object(cli_module, "_LOCAL_CONFIG_PATH", tmp_path / "nope.yaml"):
+        assert _load_local_config_value("alambic", "base_url") is None
+
+
+def test_load_local_config_value_reads_nested_key(tmp_path: Path):
+    local = tmp_path / "local.yaml"
+    local.write_text(
+        "alambic:\n  base_url: https://alambic.test\n",
+        encoding="utf-8",
+    )
+    with patch.object(cli_module, "_LOCAL_CONFIG_PATH", local):
+        assert _load_local_config_value("alambic", "base_url") == "https://alambic.test"
+
+
+def test_load_local_config_value_returns_none_for_missing_key(tmp_path: Path):
+    local = tmp_path / "local.yaml"
+    local.write_text("mlflow:\n  tracking_uri: https://x\n", encoding="utf-8")
+    with patch.object(cli_module, "_LOCAL_CONFIG_PATH", local):
+        # alambic section not present at all
+        assert _load_local_config_value("alambic", "base_url") is None
+        # half-present chain
+        assert _load_local_config_value("mlflow", "missing") is None

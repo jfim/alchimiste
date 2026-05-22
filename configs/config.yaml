@@ -8,6 +8,12 @@ defaults:
   - training: default
   - eval: default
   - _self_
+  # Per-machine overrides (tracking URI, alambic base URL, etc.).
+  # Looks for configs/local/default.yaml (gitignored); silently skipped
+  # when absent. `@_global_` lands keys at the config root so contents
+  # like `mlflow.tracking_uri` override the matching top-level keys
+  # instead of nesting under a `local` package.
+  - optional local@_global_: default
 
 mlflow:
   experiment: alchimiste-text-cleaner
