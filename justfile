@@ -56,8 +56,9 @@ eval *ARGS:
     uv run python -m alchimiste.cleaner.eval.run {{ARGS}}
 
 # Predict from stdin -> JSON drop_ranges on stdout.
+# Example: `cat article.md | just predict --artifact=runs/2026-05-21/12-00-00`
 predict *ARGS:
-    @echo "TODO TASK-026: wire just predict -> uv run python -m alchimiste.cleaner.inference.cli {{ARGS}}"
+    uv run python -m alchimiste.cleaner.inference.cli {{ARGS}}
 
 # Print corpus statistics for the cleaning dataset.
 label-stats *ARGS:
