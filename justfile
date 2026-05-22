@@ -45,11 +45,11 @@ pull-cleaning repo_dir:
 
 # Train a cleaner model. Extra args are forwarded to Hydra.
 train *ARGS:
-    @echo "TODO TASK-028: wire just train -> uv run python -m alchimiste.cleaner.training.loop {{ARGS}}"
+    uv run python -m alchimiste.cleaner.training.loop {{ARGS}}
 
 # Hydra multirun convenience: `just train-multi model=encoder_hf,crf seed=11,17,42`
 train-multi *ARGS:
-    @echo "TODO TASK-028: wire just train-multi -> uv run python -m alchimiste.cleaner.training.loop -m {{ARGS}}"
+    uv run python -m alchimiste.cleaner.training.loop -m {{ARGS}}
 
 # Evaluate an existing artifact on the test split. `just eval artifact=runs/<ts>`.
 eval *ARGS:
