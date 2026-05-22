@@ -61,4 +61,4 @@ predict *ARGS:
 
 # Print corpus statistics for the cleaning dataset.
 label-stats *ARGS:
-    @echo "TODO TASK-011: wire just label-stats -> uv run python -m alchimiste.cleaner.data.label_stats {{ARGS}}"
+    uv run python -m alchimiste.cleaner.data.label_stats {{ARGS}}
