@@ -47,7 +47,14 @@ def finalize(
     # 1. Validation predictions for threshold sweep.
     val_probs = tagger.predict_token_probs(list(val_examples))
     val_offsets = [list(e.codepoint_offset_mapping) for e in val_examples]
-    val_truth = [list(a.discard_ranges) for a in val_articles]
+    # Truth ranges past the tokenized window are unreachable for the model
+    # (the corresponding tokens were truncated away). Clip to the visible
+    # window so scoring measures what the model could possibly predict
+    # rather than penalizing it for truncation.
+    val_truth = [
+        _clip_ranges_to_window(a.discard_ranges, _example_window_end(e))
+        for a, e in zip(val_articles, val_examples, strict=True)
+    ]
 
     threshold_pick = sweep_thresholds(
         per_example_probs=val_probs,
@@ -67,7 +74,10 @@ def finalize(
         decode_token_runs(probs, e.codepoint_offset_mapping, threshold=threshold_pick.threshold)
         for probs, e in zip(test_probs, test_examples, strict=True)
     ]
-    test_truth = [list(a.discard_ranges) for a in test_articles]
+    test_truth = [
+        _clip_ranges_to_window(a.discard_ranges, _example_window_end(e))
+        for a, e in zip(test_articles, test_examples, strict=True)
+    ]
 
     # 3. IoU metrics at every requested threshold (REQ-009).
     iou_thresholds = tuple(float(t) for t in eval_cfg.report_iou)
@@ -115,6 +125,33 @@ def finalize(
         encoding="utf-8",
     )
     return metrics
+
+
+def _example_window_end(example: TokenizedExample) -> int:
+    """Last codepoint offset visible in a tokenized example.
+
+    Tokens past `max_seq_len` are dropped during alignment, so any truth
+    range fully past this point is unreachable for the model and should
+    not count against it during scoring.
+    """
+    return max((end for _, end in example.codepoint_offset_mapping), default=0)
+
+
+def _clip_ranges_to_window(
+    ranges: Sequence[Range],
+    window_end: int,
+) -> list[Range]:
+    """Clip truth ranges to `[0, window_end)`; drop ranges with no overlap.
+
+    A range that straddles the boundary is truncated — the visible portion
+    is still something the model can be scored on.
+    """
+    out: list[Range] = []
+    for start, end in ranges:
+        clipped_end = min(end, window_end)
+        if start < clipped_end:
+            out.append((start, clipped_end))
+    return out
 
 
 def _write_threshold_json(pick: ThresholdSelection, dst: Path) -> None:
