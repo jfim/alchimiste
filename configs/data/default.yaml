@@ -11,9 +11,10 @@ allow_dirty: false
 # natively (Open Question Q3), set to false to normalize defensively.
 require_nfc: true
 
-# Transitional knob for Open Question Q3 — alambic currently emits byte
-# offsets. Switch to "codepoint" once alambic exports codepoint offsets.
-range_units: byte
+# alambic emits codepoint offsets into NFC-normalized text as of 2026-05-21
+# (closed Open Question Q3). The transitional "byte" mode remains supported
+# in the loader for replaying older oxen commits.
+range_units: codepoint
 
 # Hard truncation for documents that exceed the model's context window
 # (out of scope: streaming / chunked inference). Truncated articles are
