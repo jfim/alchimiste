@@ -25,3 +25,11 @@ max_seq_len: 512
 # Tiny rows are usually stubs / boilerplate-only pages and add noise
 # without signal. 0 disables the filter.
 min_bytes: 1024
+
+# Seed for the train/val/test partition only. Separate from the top-
+# level `seed` (which drives weight init / DataLoader shuffle / dropout)
+# so that multi-seed averaging can hold the split fixed while varying
+# only the training trajectory. Defaults to ${seed} for backward
+# compatibility — existing recipes that only set `seed` produce the
+# same split they used to.
+split_seed: ${seed}

@@ -174,7 +174,8 @@ def _train_one(
             min_bytes=int(cfg.data.get("min_bytes", 0)),
         )
 
-    splits = make_splits(item_ids=[a.item_id for a in articles], seed=seed)
+    split_seed = int(cfg.data.get("split_seed", seed))
+    splits = make_splits(item_ids=[a.item_id for a in articles], seed=split_seed)
     splits.write_json(artifact_dir / "splits.json")
     train_arts, val_arts, test_arts = _partition_articles(articles, splits)
 
