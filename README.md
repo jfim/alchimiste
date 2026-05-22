@@ -18,8 +18,13 @@ Early scaffolding. Model architectures and training pipelines are not yet design
 ## Setup
 
 ```sh
-just sync
+just sync           # CPU torch (default — deployable, CI, smoke training)
+just sync-cuda      # CUDA torch (cu132; training boxes with NVIDIA GPU + recent driver)
 ```
+
+The two are mutually exclusive — pick one per machine. All other recipes
+(`just train`, `just eval`, `just predict`, etc.) use `uv run --no-sync` so
+they don't swap the wheel back on you.
 
 ## Common tasks
 

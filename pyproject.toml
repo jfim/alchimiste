@@ -17,7 +17,9 @@ dependencies = [
     "polars-lts-cpu>=1.0",
     "scikit-learn>=1.8.0",
     "tokenizers>=0.22.2",
-    "torch>=2.12.0",
+    # torch lives in the `cpu` / `cuda` dependency-groups (one is active
+    # at a time) rather than here, because uv requires the package to
+    # be listed in the group whose source override targets it.
     "transformers>=5.9.0",
 ]
 
@@ -30,6 +32,21 @@ dev = [
     "pytest>=8.0",
     "pytest-httpx>=0.30",
 ]
+# Mutually exclusive torch wheels. Exactly one is active per sync; the
+# `conflicts` block below tells uv they can't co-resolve. `cpu` is the
+# default (deployable, CI, laptops); `cuda` is opt-in for training
+# boxes with a GPU and pulls cu132 to match recent NVIDIA drivers.
+#
+# Use `just sync` (CPU) or `just sync-cuda` (CUDA) — those recipes
+# pass the right `--group` / `--no-group` flags so the active group
+# always matches the wheel index.
+# The `+cpu` / `+cu132` local-version tags pin the wheel variant, not
+# just the version. Without the tag uv would resolve to the bare
+# `2.12.0` wheel on the index, which on pytorch-cpu is mac-only and
+# breaks Linux installs. The tags are what makes "CPU wheel" and "CUDA
+# wheel" distinct distributions in PEP 440 terms.
+cpu = ["torch==2.12.0+cpu"]
+cuda = ["torch==2.12.0+cu132"]
 
 [build-system]
 requires = ["hatchling"]
@@ -58,10 +75,42 @@ indent-style = "space"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.uv]
+# The `cpu` and `cuda` dependency-groups both list `torch>=2.12.0` but
+# pull it from different indexes — declaring them conflicting tells uv
+# to resolve them independently instead of trying to satisfy both at
+# once. Without this, uv errors with "conflicting indexes for torch".
+default-groups = ["cpu", "dev"]
+conflicts = [
+    [
+        { group = "cpu" },
+        { group = "cuda" },
+    ],
+]
+# Lock for Linux only. The pytorch-cpu index publishes a bare `torch==X.Y.Z`
+# wheel for macOS *without* the `+cpu` local-version tag, alongside the
+# `X.Y.Z+cpu` Linux/Windows wheels. Per PEP 440 the bare version sorts
+# higher than `X.Y.Z+cpu`, so an unconstrained resolve picks it — and
+# then fails to install on Linux because no Linux wheel exists at that
+# version. Restricting to Linux sidesteps the whole mess; alchimiste's
+# training and deployable both target Linux anyway.
+environments = ["sys_platform == 'linux'"]
+
 [tool.uv.sources]
-torch = [{ index = "pytorch-cpu" }]
+# Active group selects the wheel index: `--group cpu` -> CPU build;
+# `--group cuda` -> cu132 build (matches CUDA 13.2 driver). Same
+# `torch>=2.12.0` requirement, same import path — only the wheel changes.
+torch = [
+    { index = "pytorch-cpu", group = "cpu" },
+    { index = "pytorch-cu132", group = "cuda" },
+]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
 explicit = true

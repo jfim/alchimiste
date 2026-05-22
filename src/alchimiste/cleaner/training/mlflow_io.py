@@ -156,13 +156,38 @@ def log_pyfunc_model(
     # files without us baking absolute paths into the model.
     from alchimiste.cleaner.inference.pyfunc import CleanerModel
 
+    # Override mlflow's auto-inferred env so the registered model stays
+    # device-portable. By default mlflow snapshots whatever torch was
+    # active at training time — a CUDA training run would otherwise
+    # pin `torch==X.Y.Z+cu132`, forcing every CPU-only consumer to pull
+    # a ~2.5 GB CUDA wheel they can't use. The trained weights load
+    # fine into either build.
     mlflow.pyfunc.log_model(
         name="model",
         python_model=CleanerModel(),
         artifacts={"artifact_root": str(artifact_dir)},
         code_paths=[str(package_root)],
         registered_model_name=registered_model_name,
+        pip_requirements=_pyfunc_pip_requirements(),
     )
+
+
+def _pyfunc_pip_requirements() -> list[str]:
+    """Pip-requirement strings to bundle with the registered pyfunc.
+
+    Intentionally device-agnostic: pin only the upper-and-lower torch
+    range that the inference code supports, not the local-variant tag
+    (`+cpu` / `+cuXXX`). Other deps come from the inference path's
+    imports and are listed here so mlflow doesn't fall back to env
+    snapshotting and accidentally embed CUDA wheels.
+    """
+    return [
+        "torch>=2.12,<3",
+        "transformers>=5.9,<6",
+        "tokenizers>=0.22",
+        "numpy>=2.4",
+        "omegaconf>=2.3",
+    ]
 
 
 def _dir_size_bytes(path: Path) -> int:
