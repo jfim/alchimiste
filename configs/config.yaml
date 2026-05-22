@@ -35,5 +35,12 @@ mlflow:
   # value = an autoresearch run). Empty → unset, leaving manual runs
   # unmarked.
   autoresearch: ""
+  # `register_model`: when true, upload the trained model as a registered
+  # pyfunc to the tracking server. The file is ~300 MB for ModernBERT and
+  # the upload to a remote server is flaky — keep off for exploratory and
+  # sweep runs. Flip on when promoting a specific run. The artifact dir
+  # under outputs/<date>/<time>/model/ is unaffected and can always be
+  # reloaded locally via `just eval`.
+  register_model: false
 
 seed: 17                     # NFR-001 reproducibility; also seeds data/split.py
