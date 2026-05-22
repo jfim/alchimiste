@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import importlib
 import json
+import random
 from dataclasses import dataclass
 from pathlib import Path
 
 import hydra
+import numpy as np
+import torch
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
@@ -54,6 +57,17 @@ def train(cfg: DictConfig) -> RunResult:
     chain."""
     artifact_dir = _resolve_artifact_dir()
     artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    # Seed every RNG that affects training BEFORE we instantiate the tagger
+    # or build the data loader. Before this, only `make_splits` consumed
+    # `cfg.seed` — the freshly-initialized classifier head, the DataLoader
+    # shuffle order, and the dropout masks all came from PyTorch's default
+    # global RNG (seeded from /dev/urandom each process). That made every
+    # training run start from a different head + see batches in a different
+    # order, producing F1 swings far larger than any hyperparameter effect
+    # we were trying to measure. See docs/autoresearch/log.md, batch-2
+    # Phase C postmortem.
+    _seed_all_rngs(int(cfg.seed))
 
     # Dataset provenance (REQ-014). Best-effort: if `data.oxen_dir` isn't
     # an oxen working tree, we tag the run as "unknown" and continue —
@@ -148,6 +162,21 @@ def train(cfg: DictConfig) -> RunResult:
         val_size=len(val_ex),
         test_size=len(test_ex),
     )
+
+
+def _seed_all_rngs(seed: int) -> None:
+    """Seed every RNG that affects training output.
+
+    Covers: PyTorch global (which feeds the DataLoader's default shuffle
+    sampler and dropout), NumPy (used by some HF tokenizer paths and any
+    sklearn calls during eval), and Python's `random` (defensive). CUDA
+    seeding piggy-backs on `torch.manual_seed` for the current device.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def _try_read_oxen_meta(oxen_dir: Path) -> OxenMeta | None:
