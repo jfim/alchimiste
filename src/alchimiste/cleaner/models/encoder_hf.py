@@ -150,6 +150,18 @@ class Tagger:
         precision = str(training_cfg.get("precision", "fp32")).lower()
         autocast_ctx, grad_scaler = _build_amp(precision, device)
 
+        # Best-on-val checkpoint tracking. When `save_best_on_val=true`,
+        # snapshot encoder + head state every time val_loss improves and
+        # restore the best snapshot before this fit() returns. The default
+        # (false) keeps the legacy "save last-epoch weights" behavior — fine
+        # for sweep runs where we mostly look at metrics. Flip on when the
+        # run is destined for deployment / inference.
+        save_best_on_val = bool(training_cfg.get("save_best_on_val", False))
+        best_val_loss = float("inf")
+        best_encoder_state: dict | None = None
+        best_head_state: dict | None = None
+        best_epoch: int | None = None
+
         step = 0
         micro_step = 0
         optimizer.zero_grad()
@@ -209,6 +221,34 @@ class Tagger:
             callbacks.on_epoch_end(
                 epoch,
                 {"train/epoch_loss": mean_epoch_loss, **val_metrics},
+            )
+
+            if save_best_on_val:
+                v = float(val_metrics.get("val_loss", float("nan")))
+                # NaN never compares strictly less than anything, so a bad
+                # epoch (e.g. empty val set) skips the checkpoint cleanly.
+                if v < best_val_loss:
+                    best_val_loss = v
+                    # CPU clone so the snapshot doesn't fight live training
+                    # tensors for GPU memory across the rest of the run.
+                    best_encoder_state = {
+                        k: t.detach().cpu().clone() for k, t in self.encoder.state_dict().items()
+                    }
+                    best_head_state = {
+                        k: t.detach().cpu().clone() for k, t in self.head.state_dict().items()
+                    }
+                    best_epoch = epoch
+
+        if save_best_on_val and best_encoder_state is not None and best_head_state is not None:
+            # Restore the best-on-val weights so subsequent predict / save
+            # calls reflect them, not the final-epoch state.
+            self.encoder.load_state_dict(best_encoder_state)
+            self.head.load_state_dict(best_head_state)
+            callbacks.on_epoch_end(
+                # Re-emit at a clearly distinguishable step so the time
+                # series shows where the restored checkpoint came from.
+                epochs,
+                {"val/best_val_loss": best_val_loss, "val/best_epoch": float(best_epoch or 0)},
             )
 
     def predict_token_probs(
