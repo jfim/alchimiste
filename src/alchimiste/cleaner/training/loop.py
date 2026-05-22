@@ -27,6 +27,7 @@ from alchimiste.cleaner.data.oxen_meta import OxenMeta, read_commit
 from alchimiste.cleaner.data.split import SplitsManifest, make_splits
 from alchimiste.cleaner.models.base import TokenTagger
 from alchimiste.cleaner.training import mlflow_io
+from alchimiste.cleaner.training.finalize import finalize as _finalize
 
 _CONFIG_PATH = str(Path(__file__).resolve().parents[4] / "configs")
 
@@ -96,20 +97,26 @@ def train(cfg: DictConfig) -> RunResult:
     with mlflow_io.start_run(cfg, oxen_meta=oxen_meta):
         callbacks = mlflow_io.build_callbacks()
         tagger.fit(train_ex, val_ex, model_cfg, callbacks)
-
-        # Smoke-call predict on val so a broken predict_token_probs
-        # surfaces immediately, not at eval time.
-        _ = tagger.predict_token_probs(val_ex)
-
         tagger.save(artifact_dir / "model")
 
         # Persist the resolved config alongside the artifact so it can be
         # re-loaded without re-composing (REQ-011 artifact layout).
         OmegaConf.save(cfg, artifact_dir / "config.yaml")
 
-        # Final test metrics + artifact bundle (REQ-015). TASK-021 fills in
-        # the actual test metric set; the call shape is stable now.
-        mlflow_io.log_final({}, artifact_dir)
+        # Threshold sweep on val + IoU/REQ-003 metrics on test (TASK-020,
+        # TASK-021). Returns the metric dict for mlflow + metrics.json.
+        metrics = _finalize(
+            tagger=tagger,
+            val_articles=val_arts,
+            val_examples=val_ex,
+            test_articles=test_arts,
+            test_examples=test_ex,
+            artifact_dir=artifact_dir,
+            eval_cfg=cfg.eval,
+        )
+        # mlflow accepts floats only.
+        scalar_metrics = {k: float(v) for k, v in metrics.items() if isinstance(v, (int, float))}
+        mlflow_io.log_final(scalar_metrics, artifact_dir)
 
     return RunResult(
         artifact_dir=artifact_dir,
