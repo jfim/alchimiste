@@ -11,7 +11,9 @@ defaults:
 
 mlflow:
   experiment: alchimiste-text-cleaner
-  model_name: alchimiste-text-cleaner
+  # Architecture-keyed so each model family has its own version history
+  # in the registry, instead of all architectures sharing one version list.
+  model_name: alchimiste-text-cleaner-${model.name}
   tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,file://./mlruns}
 
 seed: 17                     # NFR-001 reproducibility; also seeds data/split.py

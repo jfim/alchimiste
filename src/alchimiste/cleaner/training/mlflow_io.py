@@ -54,7 +54,7 @@ def start_run(cfg: DictConfig, oxen_meta: OxenMeta | None = None):
         mlflow.set_tracking_uri(cfg.mlflow.tracking_uri)
     mlflow.set_experiment(cfg.mlflow.experiment)
 
-    with mlflow.start_run() as run:
+    with mlflow.start_run(run_name=_run_name(cfg)) as run:
         tags = {
             TAG_MODEL_ARCHITECTURE: getattr(cfg.model, "name", "unknown"),
         }
@@ -81,12 +81,30 @@ def log_epoch(epoch: int, metrics: dict[str, float]) -> None:
 
 
 def log_final(test_metrics: dict[str, float], artifact_dir: Path) -> None:
-    """End-of-run: log final test metrics (each as a single-step series)
-    and the artifact directory as a run artifact bundle."""
+    """End-of-run: log final test metrics and the small browsable sidecars.
+
+    The trained weights are *not* logged here — they ship as a registered
+    pyfunc via `log_pyfunc_model`, which is the single source of truth.
+    Logging the whole `artifact_dir` would duplicate the weights on the
+    tracking server for no benefit.
+    """
     for k, v in test_metrics.items():
         mlflow.log_metric(_namespaced_metric_key(k, default_ns="test"), float(v))
-    if artifact_dir.exists():
-        mlflow.log_artifacts(str(artifact_dir))
+    for sidecar in _SIDECAR_FILES:
+        path = artifact_dir / sidecar
+        if path.exists():
+            mlflow.log_artifact(str(path))
+
+
+# Text-only files worth keeping at the run root for quick UI browsing.
+# Model weights live in the registered pyfunc, not here.
+_SIDECAR_FILES = (
+    "config.yaml",
+    "metrics.json",
+    "threshold.json",
+    "splits.json",
+    "failures.jsonl",
+)
 
 
 # Soft warning threshold for the registered model footprint. Lives here
@@ -176,6 +194,14 @@ def _flat_params(cfg: DictConfig, prefix: str = "") -> dict[str, str]:
         else:
             out[key] = str(v)
     return out
+
+
+def _run_name(cfg: DictConfig) -> str:
+    """Readable run name so a sweep is scannable in the UI without
+    drilling into tags. Auto-generated names ("abundant-cow-23") make
+    parallel-experiment comparison painful."""
+    arch = getattr(cfg.model, "name", "unknown")
+    return f"{arch}-seed{cfg.seed}"
 
 
 def _namespaced_metric_key(name: str, *, default_ns: str = "val") -> str:
