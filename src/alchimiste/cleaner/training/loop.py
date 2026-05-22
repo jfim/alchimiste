@@ -15,6 +15,7 @@ mutable location.
 from __future__ import annotations
 
 import importlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -117,6 +118,21 @@ def train(cfg: DictConfig) -> RunResult:
         # mlflow accepts floats only.
         scalar_metrics = {k: float(v) for k, v in metrics.items() if isinstance(v, (int, float))}
         mlflow_io.log_final(scalar_metrics, artifact_dir)
+
+        # Register a self-contained pyfunc that any consumer can load
+        # via mlflow.pyfunc.load_model (REQ-011).
+        threshold_payload = json.loads(
+            (artifact_dir / "threshold.json").read_text(encoding="utf-8")
+        )
+        mlflow_io.log_pyfunc_model(
+            artifact_dir,
+            registered_model_name=cfg.mlflow.model_name,
+            threshold=float(threshold_payload["threshold"]),
+            threshold_iou=float(threshold_payload["iou_metric"]),
+            fell_back_to_max_precision=bool(
+                threshold_payload["fell_back_to_max_precision"]
+            ),
+        )
 
     return RunResult(
         artifact_dir=artifact_dir,
