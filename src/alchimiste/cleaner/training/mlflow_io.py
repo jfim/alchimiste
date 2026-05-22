@@ -63,6 +63,12 @@ def start_run(cfg: DictConfig, oxen_meta: OxenMeta | None = None):
             tags[TAG_DATASET_OXEN_COMMIT] = oxen_meta.commit_hash
             tags[TAG_DATASET_DIRTY] = str(oxen_meta.dirty).lower()
         tags[TAG_DATASET_OXEN_DIR] = str(cfg.data.oxen_dir)
+        # MLflow surfaces `mlflow.note.content` as the run's "Description"
+        # in the UI. Optional: empty string → unset so we don't clutter
+        # runs that didn't bother to add a note.
+        note = str(cfg.mlflow.get("note", "") or "").strip()
+        if note:
+            tags["mlflow.note.content"] = note
         mlflow.set_tags(tags)
 
         mlflow.log_params(_flat_params(cfg))
@@ -224,14 +230,20 @@ def _flat_params(cfg: DictConfig, prefix: str = "") -> dict[str, str]:
 
 def _run_name(cfg: DictConfig) -> str:
     """Readable run name so a sweep is scannable in the UI without
-    drilling into tags. Auto-generated names ("abundant-cow-23") make
-    parallel-experiment comparison painful. Hydra's run timestamp is
-    appended so back-to-back runs with the same arch+seed remain
-    distinguishable."""
+    drilling into tags.
+
+    Format:
+      * `<arch>-<suffix>` when `cfg.mlflow.run_name_suffix` is set
+        (autoresearch passes a short slug per experiment, e.g. "ep6-clw10")
+      * `<arch>-<timestamp>` otherwise — the Hydra run stamp keeps
+        back-to-back runs with identical configs distinguishable.
+    """
     arch = getattr(cfg.model, "name", "unknown")
-    base = f"{arch}-seed{cfg.seed}"
-    suffix = _hydra_run_stamp()
-    return f"{base}-{suffix}" if suffix else base
+    suffix = str(cfg.mlflow.get("run_name_suffix", "") or "").strip()
+    if suffix:
+        return f"{arch}-{suffix}"
+    stamp = _hydra_run_stamp()
+    return f"{arch}-{stamp}" if stamp else arch
 
 
 def _hydra_run_stamp() -> str | None:

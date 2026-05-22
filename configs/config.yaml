@@ -21,5 +21,13 @@ mlflow:
   # in the registry, instead of all architectures sharing one version list.
   model_name: alchimiste-text-cleaner-${model.name}
   tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,file://./mlruns}
+  # Optional per-run annotation knobs (autoresearch / sweep ergonomics).
+  # `run_name_suffix`: when set, the MLflow run is named `<arch>-<suffix>`
+  # instead of `<arch>-<hydra-timestamp>`. Use a short slug that identifies
+  # what the experiment varies, e.g. `ep6-clw10`.
+  run_name_suffix: ""
+  # `note`: free-form description (markdown supported) surfaced in the
+  # MLflow UI as the run's "Description" via the `mlflow.note.content` tag.
+  note: ""
 
 seed: 17                     # NFR-001 reproducibility; also seeds data/split.py
