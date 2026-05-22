@@ -31,6 +31,7 @@ TAG_MODEL_ARCHITECTURE = "alchimiste.model.architecture"
 TAG_THRESHOLD_VALUE = "alchimiste.threshold.value"
 TAG_THRESHOLD_IOU = "alchimiste.threshold.iou"
 TAG_THRESHOLD_FALLBACK = "alchimiste.threshold.fell_back_to_max_precision"
+TAG_AUTORESEARCH = "alchimiste.autoresearch"
 
 
 @dataclass
@@ -69,6 +70,13 @@ def start_run(cfg: DictConfig, oxen_meta: OxenMeta | None = None):
         note = str(cfg.mlflow.get("note", "") or "").strip()
         if note:
             tags["mlflow.note.content"] = note
+        # Autoresearch grouping. Set as a single tag with a free-form value
+        # (e.g. "batch-1") so the UI can filter both `tags.alchimiste.autoresearch
+        # != ""` (all autoresearch runs across batches) and equality for a
+        # single batch. Empty → tag not set, keeping manual runs unmarked.
+        autoresearch = str(cfg.mlflow.get("autoresearch", "") or "").strip()
+        if autoresearch:
+            tags[TAG_AUTORESEARCH] = autoresearch
         mlflow.set_tags(tags)
 
         mlflow.log_params(_flat_params(cfg))
