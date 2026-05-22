@@ -58,3 +58,7 @@ multirun/
 # Local env
 .env
 .env.local
+
+# Per-machine Hydra overrides (tracking URIs, service URLs, etc.)
+# Use configs/local/default.yaml.example as a template.
+configs/local/default.yaml

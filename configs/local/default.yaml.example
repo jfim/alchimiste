@@ -1,0 +1,15 @@
+# Per-machine overrides. Copy to configs/local/default.yaml (gitignored)
+# and edit. Picked up automatically by `train` (via Hydra's optional
+# `local` group) and by `pull` (which reads the same file directly).
+#
+# Everything in here is optional — omit a section to fall back to the
+# defaults in configs/config.yaml or the CLI's argparse defaults.
+
+mlflow:
+  # Overrides MLFLOW_TRACKING_URI for `just train` and friends.
+  tracking_uri: https://mlflow.example.com/
+
+alambic:
+  # Overrides ALAMBIC_BASE_URL for `just pull-cleaning`. CLI `--base-url`
+  # still wins.
+  base_url: https://alambic.example.com

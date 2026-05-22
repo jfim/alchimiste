@@ -10,12 +10,40 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
+from omegaconf import OmegaConf
 
 from alchimiste.datasets.client import AlambicClient
 from alchimiste.datasets.oxen import oxen_commit, oxen_push
 from alchimiste.datasets.sync import sync_blobs
 
 STAGES = ("extraction", "cleaning")
+
+# configs/ lives next to src/, four levels up from this file. The same
+# file is loaded by Hydra as the `local` group default for training.
+_LOCAL_CONFIG_PATH = (
+    Path(__file__).resolve().parents[2] / "configs" / "local" / "default.yaml"
+)
+
+
+def _load_local_config_value(*keys: str) -> str | None:
+    """Look up a dotted key in `configs/local.yaml`, returning None when
+    the file is absent or the key chain doesn't resolve.
+
+    Used by argparse defaults so the CLI picks up per-machine settings
+    without a Hydra entrypoint. Failures are silent: this is a
+    convenience layer, not a config validator."""
+    if not _LOCAL_CONFIG_PATH.exists():
+        return None
+    try:
+        cfg = OmegaConf.load(_LOCAL_CONFIG_PATH)
+    except Exception:
+        return None
+    node: Any = cfg
+    for k in keys:
+        if not OmegaConf.is_config(node) or k not in node:
+            return None
+        node = node[k]
+    return str(node) if node is not None else None
 
 
 def pull(
@@ -65,10 +93,21 @@ def main(argv: list[str] | None = None) -> int:
     pull_p = sub.add_parser("pull", help="pull a dataset stage from alambic into an oxen repo")
     pull_p.add_argument("stage", choices=STAGES)
     pull_p.add_argument("repo_dir", type=Path)
+    # Precedence: explicit --base-url > configs/local.yaml > ALAMBIC_BASE_URL env.
+    # configs/local.yaml is the recommended per-machine setting (see
+    # configs/local.yaml.example); the env var is kept as a fallback so
+    # one-off invocations and CI don't need a config file.
     pull_p.add_argument(
         "--base-url",
-        default=os.environ.get("ALAMBIC_BASE_URL"),
-        help="alambic base URL (or set ALAMBIC_BASE_URL env)",
+        default=(
+            _load_local_config_value("alambic", "base_url")
+            or os.environ.get("ALAMBIC_BASE_URL")
+        ),
+        help=(
+            "alambic base URL "
+            "(or set alambic.base_url in configs/local.yaml, "
+            "or ALAMBIC_BASE_URL env)"
+        ),
     )
     pull_p.add_argument("--skip-commit", action="store_true")
     pull_p.add_argument(
