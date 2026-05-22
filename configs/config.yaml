@@ -29,5 +29,11 @@ mlflow:
   # `note`: free-form description (markdown supported) surfaced in the
   # MLflow UI as the run's "Description" via the `mlflow.note.content` tag.
   note: ""
+  # `autoresearch`: groups runs from an automated experiment campaign.
+  # Logged as the `alchimiste.autoresearch` tag with this exact value so
+  # the UI can filter by batch ("batch-1") or by presence (any non-empty
+  # value = an autoresearch run). Empty → unset, leaving manual runs
+  # unmarked.
+  autoresearch: ""
 
 seed: 17                     # NFR-001 reproducibility; also seeds data/split.py
