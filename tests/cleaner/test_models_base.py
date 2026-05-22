@@ -7,12 +7,28 @@ from pathlib import Path
 from omegaconf import DictConfig
 
 from alchimiste.cleaner.data.align import TokenizedExample
+from alchimiste.cleaner.data.loader import LabeledArticle
 from alchimiste.cleaner.models.base import TokenTagger, TrainingCallbacks
 
 
 class _StubTagger:
     """Minimal `TokenTagger` impl — exists to prove the Protocol is satisfiable
     by a plain class without inheritance (structural typing)."""
+
+    def tokenize(
+        self,
+        articles: list[LabeledArticle],
+        max_seq_len: int,
+    ) -> list[TokenizedExample]:
+        return [
+            TokenizedExample(
+                item_id=a.item_id,
+                input_ids=(1, 2, 3),
+                codepoint_offset_mapping=((0, 0), (0, 1), (1, 2)),
+                labels=(-100, 0, 0),
+            )
+            for a in articles
+        ]
 
     def fit(
         self,
