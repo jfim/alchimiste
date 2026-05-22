@@ -61,8 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"alchimiste-clean: elapsed_seconds={elapsed:.3f}\n")
         if elapsed > _BENCH_HARD_CAP_SECONDS:
             sys.stderr.write(
-                f"alchimiste-clean: exceeded NFR-003 cap of "
-                f"{_BENCH_HARD_CAP_SECONDS:.0f}s\n"
+                f"alchimiste-clean: exceeded NFR-003 cap of {_BENCH_HARD_CAP_SECONDS:.0f}s\n"
             )
             return 1
     return 0
