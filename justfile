@@ -51,9 +51,9 @@ train *ARGS:
 train-multi *ARGS:
     @echo "TODO TASK-028: wire just train-multi -> uv run python -m alchimiste.cleaner.training.loop -m {{ARGS}}"
 
-# Evaluate an existing mlflow run on the test split.
+# Evaluate an existing artifact on the test split. `just eval artifact=runs/<ts>`.
 eval *ARGS:
-    @echo "TODO TASK-022: wire just eval -> uv run python -m alchimiste.cleaner.eval {{ARGS}}"
+    uv run python -m alchimiste.cleaner.eval.run {{ARGS}}
 
 # Predict from stdin -> JSON drop_ranges on stdout.
 predict *ARGS:
