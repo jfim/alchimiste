@@ -10,10 +10,12 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import mlflow
 from hydra.core.hydra_config import HydraConfig
+from mlflow.data.dataset_source import DatasetSource
+from mlflow.data.meta_dataset import MetaDataset
 
 from alchimiste.cleaner.data.oxen_meta import OxenMeta
 from alchimiste.cleaner.models.base import TrainingCallbacks
@@ -79,8 +81,86 @@ def start_run(cfg: DictConfig, oxen_meta: OxenMeta | None = None):
             tags[TAG_AUTORESEARCH] = autoresearch
         mlflow.set_tags(tags)
 
+        if oxen_meta is not None:
+            mlflow.log_input(_build_dataset(oxen_meta, Path(cfg.data.oxen_dir)))
+
         mlflow.log_params(_flat_params(cfg))
         yield RunHandle(run_id=run.info.run_id, experiment_id=run.info.experiment_id)
+
+
+class OxenDatasetSource(DatasetSource):
+    """MLflow `DatasetSource` for an oxen-versioned dataset.
+
+    Pointer-only: `load()` is unsupported because the data lives in oxen
+    and the training pipeline reads it directly, not through MLflow.
+    """
+
+    def __init__(self, oxen_dir: str, commit_hash: str) -> None:
+        self.oxen_dir = oxen_dir
+        self.commit_hash = commit_hash
+
+    @staticmethod
+    def _get_source_type() -> str:
+        return "oxen"
+
+    def load(self) -> Any:
+        raise NotImplementedError(
+            "OxenDatasetSource is a pointer; check out the commit via `oxen` directly."
+        )
+
+    @staticmethod
+    def _can_resolve(raw_source: Any) -> bool:
+        return False
+
+    @classmethod
+    def _resolve(cls, raw_source: Any) -> "OxenDatasetSource":
+        raise NotImplementedError
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"oxen_dir": self.oxen_dir, "commit_hash": self.commit_hash}
+
+    @classmethod
+    def from_dict(cls, source_dict: dict[Any, Any]) -> "OxenDatasetSource":
+        return cls(oxen_dir=source_dict["oxen_dir"], commit_hash=source_dict["commit_hash"])
+
+
+def _count_articles(oxen_dir: Path) -> int | None:
+    """Count distinct articles in the dataset.
+
+    Prefers `<oxen_dir>/blobs/` (one file per article); falls back to the
+    row count of `rows.parquet`. Returns `None` if neither is available.
+    """
+    blobs = oxen_dir / "blobs"
+    if blobs.is_dir():
+        return sum(1 for _ in blobs.iterdir())
+    rows = oxen_dir / "rows.parquet"
+    if rows.is_file():
+        try:
+            import pyarrow.parquet as pq
+
+            return pq.ParquetFile(rows).metadata.num_rows
+        except Exception:
+            return None
+    return None
+
+
+def _build_dataset(oxen_meta: OxenMeta, oxen_dir: Path) -> MetaDataset:
+    """Build an MLflow `MetaDataset` pointing at the oxen commit.
+
+    Name shape: `{prefix}-{short_hash}-n-{count}[-dirty]`. `prefix` is the
+    oxen-dir leaf so swapping subtrees auto-renames the dataset. `count`
+    falls back to `?` if it can't be determined — better to log a slightly
+    less informative name than to crash the run.
+    """
+    prefix = oxen_dir.name or "dataset"
+    short_hash = oxen_meta.commit_hash[:6]
+    n = _count_articles(oxen_dir)
+    n_part = str(n) if n is not None else "?"
+    name = f"{prefix}-{short_hash}-n-{n_part}"
+    if oxen_meta.dirty:
+        name += "-dirty"
+    source = OxenDatasetSource(oxen_dir=str(oxen_dir), commit_hash=oxen_meta.commit_hash)
+    return MetaDataset(source=source, name=name)
 
 
 def log_batch(step: int, loss: float) -> None:
