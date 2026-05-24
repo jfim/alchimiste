@@ -260,14 +260,35 @@ class Tagger:
         device = next(self.encoder.parameters()).device
         self.encoder.eval()
         self.head.eval()
+        # Reuse the training collate so we get padded batches. Order is
+        # preserved (shuffle=False); per-example lengths are recovered from
+        # the original `examples` list to strip padding from the outputs.
+        # An isolated generator keeps DataLoader's base-seed draw from
+        # nudging the global RNG (which would otherwise perturb the
+        # training-time shuffle on subsequent epochs).
+        batch_size = int(_resolve_training_cfg(self.cfg).get("eval_batch_size", 32))
+        loader = DataLoader(
+            _PaddedDataset(examples, pad_token_id=self.tokenizer.pad_token_id or 0),
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=_PaddedDataset.collate,
+            generator=torch.Generator(),
+        )
         out: list[list[float]] = []
+        idx = 0
         with torch.no_grad():
-            for ex in examples:
-                input_ids = torch.tensor([ex.input_ids], device=device)
-                attn = torch.ones_like(input_ids)
-                head_out = self._forward(input_ids=input_ids, attention_mask=attn)
-                probs = torch.softmax(head_out.logits, dim=-1)[0, :, LABEL_DROP]
-                out.append([float(p) for p in probs.tolist()])
+            for batch in loader:
+                batch = {k: v.to(device) for k, v in batch.items()}
+                head_out = self._forward(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                )
+                probs = torch.softmax(head_out.logits, dim=-1)[..., LABEL_DROP]
+                probs_list = probs.tolist()
+                for row in probs_list:
+                    n = len(examples[idx].input_ids)
+                    out.append([float(p) for p in row[:n]])
+                    idx += 1
         return out
 
     def save(self, dst: Path) -> None:
@@ -333,22 +354,50 @@ class Tagger:
             return {"val_loss": float("nan")}
         self.encoder.eval()
         self.head.eval()
+        # Preserve the pre-batching metric: mean of per-example mean-over-
+        # tokens losses (when val ran with batch_size=1 the batch loss WAS
+        # the per-example loss, and we averaged those). Computing CE with
+        # reduction='none' lets us reduce per-example, then average across
+        # examples, exactly matching the old behavior.
+        batch_size = int(_resolve_training_cfg(self.cfg).get("eval_batch_size", 32))
+        loader = DataLoader(
+            _PaddedDataset(val, pad_token_id=self.tokenizer.pad_token_id or 0),
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=_PaddedDataset.collate,
+            # Isolated generator: keeps the eval DataLoader's base-seed draw
+            # from advancing the global RNG mid-fit, which would otherwise
+            # perturb the next epoch's training shuffle.
+            generator=torch.Generator(),
+        )
+        per_example_loss_fn = nn.CrossEntropyLoss(
+            weight=loss_fn.weight,
+            ignore_index=LABEL_IGNORE,
+            label_smoothing=loss_fn.label_smoothing,
+            reduction="none",
+        )
         total = 0.0
         n = 0
         with torch.no_grad():
-            for ex in val:
-                input_ids = torch.tensor([ex.input_ids], device=device)
-                labels = torch.tensor([ex.labels], device=device)
-                attn = torch.ones_like(input_ids)
+            for batch in loader:
+                batch = {k: v.to(device) for k, v in batch.items()}
                 head_out = self._forward(
-                    input_ids=input_ids,
-                    attention_mask=attn,
-                    labels=labels,
-                    loss_fn=loss_fn,
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
                 )
-                assert head_out.loss is not None
-                total += float(head_out.loss.item())
-                n += 1
+                # logits: (B, T, C); labels: (B, T)
+                logits = head_out.logits
+                labels = batch["labels"]
+                per_tok = per_example_loss_fn(
+                    logits.reshape(-1, logits.size(-1)),
+                    labels.reshape(-1),
+                ).view(labels.shape)
+                valid = (labels != LABEL_IGNORE).to(per_tok.dtype)
+                per_ex_sum = (per_tok * valid).sum(dim=1)
+                per_ex_count = valid.sum(dim=1).clamp_min(1.0)
+                per_ex_mean = per_ex_sum / per_ex_count
+                total += float(per_ex_mean.sum().item())
+                n += per_ex_mean.numel()
         return {"val_loss": total / max(n, 1)}
 
 
