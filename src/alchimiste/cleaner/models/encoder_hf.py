@@ -105,6 +105,17 @@ class Tagger:
             device=device,
         )
 
+        # `torch.compile` traces encoder+head into fused kernels. `dynamic=True`
+        # tells the compiler our sequence dimension varies per batch (we pad
+        # to the longest example in each batch), which avoids recompiles.
+        # We compile in place; `OptimizedModule` is a transparent wrapper —
+        # `.train()/.eval()/.state_dict()/.parameters()` all delegate to the
+        # original module. `save()` unwraps via `_orig_mod` before calling
+        # `save_pretrained`, since that HF method isn't on `OptimizedModule`.
+        if bool(training_cfg.get("torch_compile", False)):
+            self.encoder = torch.compile(self.encoder, dynamic=True)
+            self.head = torch.compile(self.head, dynamic=True)
+
         batch_size = int(training_cfg.get("batch_size", 8))
         loader = DataLoader(
             _PaddedDataset(train, pad_token_id=self.tokenizer.pad_token_id or 0),
@@ -276,9 +287,14 @@ class Tagger:
 
     def save(self, dst: Path) -> None:
         dst.mkdir(parents=True, exist_ok=True)
-        self.encoder.save_pretrained(dst)
+        # If the encoder/head were wrapped by `torch.compile`, peel back to
+        # the underlying HF model so `save_pretrained` is available and the
+        # checkpoint is portable across runs that don't compile.
+        encoder = getattr(self.encoder, "_orig_mod", self.encoder)
+        head = getattr(self.head, "_orig_mod", self.head)
+        encoder.save_pretrained(dst)
         self.tokenizer.save_pretrained(dst)
-        torch.save(self.head.state_dict(), dst / _HEAD_STATE_FILENAME)
+        torch.save(head.state_dict(), dst / _HEAD_STATE_FILENAME)
         (dst / _METADATA_FILENAME).write_text(
             json.dumps(
                 {"hf_model_name": self._hf_model_name, "head": dict(self._head_cfg)},
