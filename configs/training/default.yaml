@@ -59,3 +59,11 @@ head_lr_multiplier: 1.0
 # especially on small datasets where the final epoch is often more
 # overfit than the best mid-training epoch.
 save_best_on_val: false
+
+# Wrap encoder + head in `torch.compile` (dynamic=True for variable seq
+# length). On CUDA this typically yields 15-30% speedup after a small
+# one-time warmup compile. The first forward of each new shape pays a
+# compile cost; `dynamic=True` keeps recompiles to a minimum across
+# differently-padded batches. Off by default — opt in once a run is
+# stable, especially for long training jobs where the warmup amortizes.
+torch_compile: false
