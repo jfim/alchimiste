@@ -207,8 +207,12 @@ class Tagger:
                         scheduler.step()
                     optimizer.zero_grad()
 
-                callbacks.on_batch_end(step, float(loss.item()))
-                epoch_loss += float(loss.item())
+                # `.item()` forces a GPU→CPU sync; cache the value so the
+                # logging callback and the epoch accumulator share one sync
+                # per step instead of two.
+                loss_val = float(loss.item())
+                callbacks.on_batch_end(step, loss_val)
+                epoch_loss += loss_val
                 n_batches += 1
                 step += 1
 
