@@ -106,11 +106,16 @@ class Tagger:
         )
 
         batch_size = int(training_cfg.get("batch_size", 8))
+        # `pin_memory` only does anything when the destination is CUDA — pinned
+        # host pages let CUDA do async H→D copies. Gating on device.type avoids
+        # a needless allocation overhead on CPU-only runs.
+        use_pin = device.type == "cuda"
         loader = DataLoader(
             _PaddedDataset(train, pad_token_id=self.tokenizer.pad_token_id or 0),
             batch_size=batch_size,
             shuffle=True,
             collate_fn=_PaddedDataset.collate,
+            pin_memory=use_pin,
         )
 
         # Two param groups so the freshly-init'd head can learn faster than
@@ -171,7 +176,7 @@ class Tagger:
             epoch_loss = 0.0
             n_batches = 0
             for batch in loader:
-                batch = {k: v.to(device) for k, v in batch.items()}
+                batch = {k: v.to(device, non_blocking=use_pin) for k, v in batch.items()}
                 with autocast_ctx():
                     head_out = self._forward(
                         input_ids=batch["input_ids"],
