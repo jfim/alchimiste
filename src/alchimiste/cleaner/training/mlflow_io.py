@@ -7,8 +7,9 @@ tag keys (see design.md § 5.4).
 
 from __future__ import annotations
 
+import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -16,6 +17,7 @@ import mlflow
 from hydra.core.hydra_config import HydraConfig
 from mlflow.data.dataset_source import DatasetSource
 from mlflow.data.meta_dataset import MetaDataset
+from mlflow.entities import Metric
 
 from alchimiste.cleaner.data.oxen_meta import OxenMeta
 from alchimiste.cleaner.models.base import TrainingCallbacks
@@ -163,16 +165,50 @@ def _build_dataset(oxen_meta: OxenMeta, oxen_dir: Path) -> MetaDataset:
     return MetaDataset(source=source, name=name)
 
 
-def log_batch(step: int, loss: float) -> None:
-    """Per-batch hook — `train/loss` time series."""
-    mlflow.log_metric("train/loss", loss, step=step)
+@dataclass
+class _BufferedCallbacks:
+    """Buffers per-step train losses and flushes once per epoch.
 
+    Pre-refactor each `on_batch_end` did a sync `mlflow.log_metric` HTTP
+    call. With ~18 batches/epoch × 6 epochs that's ~108 calls/seed; the
+    server hits postgres on every write, fsync'ing per call. Batching
+    the per-step series into one `client.log_batch` per epoch keeps the
+    per-batch granularity in the UI but drops the call rate from
+    ~3/sec to 1/epoch.
+    """
 
-def log_epoch(epoch: int, metrics: dict[str, float]) -> None:
-    """Per-epoch hook — logs each key under `val/` (or as-is if it has a
-    slash) so the UI groups them sensibly."""
-    for k, v in metrics.items():
-        mlflow.log_metric(_namespaced_metric_key(k), float(v), step=epoch)
+    batch_buffer: list[Metric] = field(default_factory=list)
+
+    def on_batch_end(self, step: int, loss: float) -> None:
+        self.batch_buffer.append(
+            Metric(
+                key="train/loss",
+                value=float(loss),
+                timestamp=int(time.time() * 1000),
+                step=step,
+            )
+        )
+
+    def on_epoch_end(self, epoch: int, metrics: dict[str, float]) -> None:
+        ts = int(time.time() * 1000)
+        epoch_metrics = [
+            Metric(
+                key=_namespaced_metric_key(k),
+                value=float(v),
+                timestamp=ts,
+                step=epoch,
+            )
+            for k, v in metrics.items()
+        ]
+        all_metrics = self.batch_buffer + epoch_metrics
+        self.batch_buffer = []
+        if not all_metrics:
+            return
+        run = mlflow.active_run()
+        if run is None:
+            return
+        client = mlflow.tracking.MlflowClient()
+        client.log_batch(run.info.run_id, metrics=all_metrics)
 
 
 def log_final(test_metrics: dict[str, float], artifact_dir: Path) -> None:
@@ -290,8 +326,11 @@ def _dir_size_bytes(path: Path) -> int:
 
 
 def build_callbacks() -> TrainingCallbacks:
-    """A `TrainingCallbacks` whose hooks route to `log_batch` / `log_epoch`."""
-    return TrainingCallbacks(on_batch_end=log_batch, on_epoch_end=log_epoch)
+    """Buffered callbacks: per-step train losses accumulate in memory and
+    flush once per epoch alongside the epoch metrics, in a single
+    `client.log_batch` call."""
+    cb = _BufferedCallbacks()
+    return TrainingCallbacks(on_batch_end=cb.on_batch_end, on_epoch_end=cb.on_epoch_end)
 
 
 # ---------------------------------------------------------------------------- #

@@ -127,6 +127,19 @@ def train_seeds(cfg: DictConfig, seeds: list[int]) -> list[RunResult]:
             tokenized_by_id=all_tokenized,
         )
         results.append(result)
+        # Release the just-finished seed's encoder/head/optimizer state
+        # before allocating the next one. Without this, PyTorch's caching
+        # allocator holds onto the previous seed's tensors and the second
+        # seed of a long-context sweep can OOM even when it would have
+        # fit standalone. Explicit gc + empty_cache is cheap (sub-second)
+        # next to per-seed wall time.
+        import gc
+
+        import torch
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     return results
 
 
