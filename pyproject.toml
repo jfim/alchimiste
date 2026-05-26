@@ -46,7 +46,11 @@ dev = [
 # breaks Linux installs. The tags are what makes "CPU wheel" and "CUDA
 # wheel" distinct distributions in PEP 440 terms.
 cpu = ["torch==2.12.0+cpu"]
-cuda = ["torch==2.12.0+cu132"]
+# `xformers` is a hard import in some HF custom modeling files
+# (e.g. chandar-lab/NeoBERT pulls in `xformers.ops.SwiGLU`
+# unconditionally). CUDA-only wheel — no CPU build is needed since the
+# CPU group only runs inference on small encoders.
+cuda = ["torch==2.12.0+cu132", "xformers>=0.0.35"]
 
 [build-system]
 requires = ["hatchling"]

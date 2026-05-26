@@ -1,0 +1,34 @@
+# NeoBERT-base (chandar-lab/NeoBERT) with the same `encoder_hf` adapter
+# as distilbert/ModernBERT. NeoBERT's modeling code is custom-loaded
+# from the hub, so `trust_remote_code: true` is required.
+#
+# Native pretraining context is 4096 tokens. The cleaner task's reachable
+# truth lives past distilbert's 512 window (see docs/autoresearch/log.md),
+# so always pair this model with `data.max_seq_len=4096`. Canonical use:
+#
+#   just train model=neobert data.max_seq_len=4096
+#
+# The 4096 isn't enforced from here (max_seq_len lives in the `data`
+# group; cross-group setting in Hydra is awkward and surprising). If
+# you forget the override, training silently runs at the data-default
+# (512) — that's a meaningful regression on this task, so check the
+# logged `data.max_seq_len` in mlflow before trusting a run.
+
+# @package model
+name: neobert
+module: alchimiste.cleaner.models.encoder_hf
+hf_model_name: chandar-lab/NeoBERT
+trust_remote_code: true
+
+head:
+  # Default to the composable head with all knobs surfaced here so CLI
+  # overrides like `model.head.conv_kernel=5` don't need a `+` prefix
+  # (Hydra struct-mode rejects appending undeclared keys). With the
+  # defaults below the behaviour is identical to a plain linear head.
+  type: composable
+  conv_kernel: 0          # 0 disables; odd ≥ 1 enables Conv1d block(s)
+  conv_stack: 1           # 1 or 2 — stacked (conv + GELU + dropout) blocks
+  conv_mode: full         # "full" | "depthwise_separable"
+  linear_stack: 1         # 1 = single Linear; 2 = MLP with hidden=hidden_size
+  crf: false              # True → CRF-NLL loss + Viterbi at inference
+  dropout: 0.1
